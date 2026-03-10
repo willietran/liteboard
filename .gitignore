@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.brief-t*.md
+.memory-entry.md
+*.jsonl
+logs/
+.autoboard-logs/
+*.tmp

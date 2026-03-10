@@ -1,0 +1,27 @@
+{
+  "name": "liteboard",
+  "version": "0.1.0",
+  "description": "AI-driven development orchestrator — from brainstorm to built feature branch",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "liteboard": "./dist/cli.js",
+    "liteboard-setup": "./dist/setup.js"
+  },
+  "files": ["dist/", "commands/", "skills/", "LICENSE", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest",
+    "dev": "tsx src/cli.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
