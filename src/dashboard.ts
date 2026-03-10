@@ -27,6 +27,7 @@ function formatElapsed(startedAt?: string): string {
 }
 
 function truncate(s: string, maxLen: number): string {
+  if (maxLen <= 1) return s.length > 0 ? "\u2026" : "";
   return s.length > maxLen ? s.slice(0, maxLen - 1) + "\u2026" : s;
 }
 
@@ -42,7 +43,7 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   const lines: string[] = [];
 
   // Progress bar
-  const barWidth = Math.min(40, cols - 30);
+  const barWidth = Math.max(1, Math.min(40, cols - 30));
   const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
   const bar = "\u2588".repeat(filled) + "\u2591".repeat(barWidth - filled);
   const failStr = failed > 0 ? ` ${RED}${failed} failed${RESET}` : "";
@@ -63,7 +64,7 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
         ? ` ${YELLOW}${t.stage}${RESET}`
         : (t.bytesReceived > 0 ? ` ${GRAY}Working...${RESET}` : "");
       const stageWidth = t.stage ? t.stage.length + 1 : (t.bytesReceived > 0 ? 11 : 0);
-      const last = truncate(t.lastLine || "starting...", cols - 55 - stageWidth);
+      const last = truncate(t.lastLine || "starting...", Math.max(1, cols - 55 - stageWidth));
       lines.push(
         `  ${CYAN}T${t.id}${RESET} ${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
       );
@@ -91,7 +92,7 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
     lines.push(`${RED}Failed (${failed}):${RESET}`);
     for (const t of tasks.filter((t) => t.status === "failed")) {
       lines.push(
-        `  ${RED}T${t.id}${RESET} ${t.title}  ${DIM}${truncate(t.lastLine, cols - 40)}${RESET}`,
+        `  ${RED}T${t.id}${RESET} ${t.title}  ${DIM}${truncate(t.lastLine, Math.max(1, cols - 40))}${RESET}`,
       );
     }
   }

@@ -34,7 +34,7 @@ function makeTask(overrides: Partial<Task> & { id: number; title: string }): Tas
     modifies: [],
     dependsOn: [],
     requirements: [],
-    tddPhase: "green",
+    tddPhase: "GREEN",
     commitMessage: `implement task ${overrides.id}`,
     complexity: 1,
     status: "queued" as TaskStatus,

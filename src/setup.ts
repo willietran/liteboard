@@ -12,7 +12,7 @@ function die(msg: string): never {
   process.exit(1);
 }
 
-function findClaudeConfigDir(): string | null {
+export function findClaudeConfigDir(): string | null {
   const home = process.env.HOME || process.env.USERPROFILE;
   if (!home) return null;
 
@@ -23,31 +23,31 @@ function findClaudeConfigDir(): string | null {
   return null;
 }
 
-function main(): void {
+export function runSetup(): void {
   console.log("\x1b[1mLiteboard Setup\x1b[0m\n");
 
   // Verify Claude Code is installed
   try {
     execFileSync("which", ["claude"], { stdio: "pipe" });
   } catch {
-    die("Claude Code CLI not found. Install it first: https://docs.anthropic.com/en/docs/claude-code");
+    throw new Error("Claude Code CLI not found. Install it first: https://docs.anthropic.com/en/docs/claude-code");
   }
 
   // Find Claude config directory
   const claudeDir = findClaudeConfigDir();
   if (!claudeDir) {
-    die("Could not find Claude Code config directory (~/.claude/).");
+    throw new Error("Could not find Claude Code config directory (~/.claude/).");
   }
 
   // Verify skills source exists
   if (!fs.existsSync(skillsSource)) {
-    die(`Skills directory not found at ${skillsSource}. Is liteboard installed correctly?`);
+    throw new Error(`Skills directory not found at ${skillsSource}. Is liteboard installed correctly?`);
   }
 
   // Read available skills
   const skillFiles = fs.readdirSync(skillsSource).filter(f => f.endsWith(".md"));
   if (skillFiles.length === 0) {
-    die("No skill files found in the skills/ directory.");
+    throw new Error("No skill files found in the skills/ directory.");
   }
 
   // Create commands directory for the plugin
@@ -73,4 +73,19 @@ function main(): void {
   console.log("  /liteboard:run              Launch orchestrator + supervisor\n");
 }
 
-main();
+function main(): void {
+  try {
+    runSetup();
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
+  }
+}
+
+// Only run when executed directly (not when imported for testing)
+const isMainModule =
+  process.argv[1] &&
+  path.resolve(process.argv[1]) ===
+    path.resolve(fileURLToPath(import.meta.url));
+if (isMainModule) {
+  main();
+}

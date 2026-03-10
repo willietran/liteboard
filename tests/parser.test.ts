@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -159,6 +159,24 @@ describe("parseManifest", () => {
     it("parses tddPhase", () => {
       expect(tasks[0].tddPhase).toBe("GREEN");
       expect(tasks[1].tddPhase).toBe("RED");
+    });
+
+    it("normalizes tddPhase case-insensitively", () => {
+      const manifest = `
+### Task 1: Lowercase TDD
+
+**TDD Phase:** green
+**Complexity Score:** 1
+
+### Task 2: Mixed case
+
+**TDD Phase:** exempt
+**Complexity Score:** 1
+`.trimStart();
+      const manifestPath = writeTmpManifest("tdd-case.md", manifest);
+      const result = parseManifest(manifestPath);
+      expect(result[0].tddPhase).toBe("GREEN");
+      expect(result[1].tddPhase).toBe("Exempt");
     });
 
     it("parses commitMessage", () => {
@@ -422,6 +440,57 @@ describe("parseManifest", () => {
       const manifestPath = writeTmpManifest("defaults4.md", SAMPLE_MANIFEST);
       const tasks = parseManifest(manifestPath);
       expect(tasks[0].stage).toBe("");
+    });
+  });
+
+  // ── 10. Manifest validation ─────────────────────────────────────────────
+
+  describe("validates manifest", () => {
+    it("throws on duplicate task IDs", () => {
+      const manifest = `
+### Task 1: First
+
+**Complexity Score:** 1
+
+### Task 1: Duplicate
+
+**Complexity Score:** 2
+`.trimStart();
+      const manifestPath = writeTmpManifest("dup-ids.md", manifest);
+      expect(() => parseManifest(manifestPath)).toThrow(/Duplicate task ID: 1/);
+    });
+
+    it("throws on dangling dependency references", () => {
+      const manifest = `
+### Task 1: First
+
+**Depends on:** Task 99
+**Complexity Score:** 1
+`.trimStart();
+      const manifestPath = writeTmpManifest("dangling-dep.md", manifest);
+      expect(() => parseManifest(manifestPath)).toThrow(
+        /Task 1 depends on Task 99, which does not exist/,
+      );
+    });
+
+    it("passes validation for a well-formed manifest", () => {
+      const manifestPath = writeTmpManifest("valid.md", SAMPLE_MANIFEST);
+      expect(() => parseManifest(manifestPath)).not.toThrow();
+    });
+
+    it("warns to stderr for out-of-range complexity but does not throw", () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const manifest = `
+### Task 1: Over-complex
+
+**Complexity Score:** 15
+`.trimStart();
+      const manifestPath = writeTmpManifest("complexity-warn.md", manifest);
+      expect(() => parseManifest(manifestPath)).not.toThrow();
+      expect(spy).toHaveBeenCalledWith(
+        expect.stringContaining("Task 1 has complexity 15"),
+      );
+      spy.mockRestore();
     });
   });
 });
