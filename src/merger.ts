@@ -28,6 +28,22 @@ function git(
   }
 }
 
+// ─── resetAndThrow helper ───────────────────────────────────────────────────
+
+function resetAndThrow(
+  taskId: number,
+  label: string,
+  error: any,
+  verbose: boolean,
+): never {
+  try {
+    git(["reset", "--hard", "HEAD"], { verbose });
+  } catch {}
+  throw new Error(
+    `${label} failed for task ${taskId}: ${error.stderr?.toString?.() || error.message}`,
+  );
+}
+
 // ─── squashMerge ─────────────────────────────────────────────────────────────
 
 export async function squashMerge(
@@ -128,20 +144,34 @@ export async function squashMerge(
       );
     } catch {}
 
-    // Step 3: Validate — run build
-    try {
-      execFileSync("npm", ["run", "build"], {
-        cwd: repoRoot,
-        stdio: "pipe",
-        encoding: "utf-8",
-      });
-    } catch (e: any) {
+    // Step 3: Validate — install deps (if needed) and run build
+    // Skip validation entirely for non-npm projects (no package.json)
+    const hasPkgJson = fs.existsSync(`${repoRoot}/package.json`);
+    if (hasPkgJson) {
       try {
-        git(["reset", "--hard", "HEAD"], { verbose });
+        execFileSync("npm", ["install"], {
+          cwd: repoRoot,
+          stdio: "pipe",
+          encoding: "utf-8",
+        });
+      } catch (e: any) {
+        resetAndThrow(taskId, "Dependency installation", e, verbose);
+      }
+
+      // Stage lockfile in case npm install updated it
+      try {
+        git(["add", "package-lock.json"], { verbose });
       } catch {}
-      throw new Error(
-        `Build validation failed for task ${taskId}: ${e.stderr || e.message}`,
-      );
+
+      try {
+        execFileSync("npm", ["run", "build"], {
+          cwd: repoRoot,
+          stdio: "pipe",
+          encoding: "utf-8",
+        });
+      } catch (e: any) {
+        resetAndThrow(taskId, "Build validation", e, verbose);
+      }
     }
 
     // Step 4: Commit

@@ -8,6 +8,7 @@ vi.mock("node:child_process", () => ({
 
 vi.mock("node:fs", () => ({
   unlinkSync: vi.fn(),
+  existsSync: vi.fn(),
 }));
 
 import { execFileSync } from "node:child_process";
@@ -16,6 +17,7 @@ import { squashMerge, abortAndRecover } from "../src/merger.js";
 
 const mockExec = vi.mocked(execFileSync);
 const mockUnlink = vi.mocked(fs.unlinkSync);
+const mockExistsSync = vi.mocked(fs.existsSync);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -38,6 +40,7 @@ function npmCalls(): [string, string[]][] {
 beforeEach(() => {
   vi.clearAllMocks();
   mockExec.mockReturnValue("");
+  mockExistsSync.mockReturnValue(true); // Default: package.json exists
 });
 
 // ─── squashMerge: happy path ─────────────────────────────────────────────────
@@ -105,15 +108,19 @@ describe("squashMerge — trial merge succeeds", () => {
     expect(resetIdx).toBeLessThan(commitIdx);
   });
 
-  it("runs build validation before commit", async () => {
+  it("runs npm install then build validation before commit", async () => {
     await squashMerge(1, "proj", "feat/x", "chore: init", false);
 
-    // npm run build should be called
+    // npm install and npm run build should be called
     const npms = npmCalls();
+    expect(npms).toContainEqual(["npm", ["install"]]);
     expect(npms).toContainEqual(["npm", ["run", "build"]]);
 
-    // Build must occur before commit
+    // Order: npm install < npm run build < git commit
     const allCalls = mockExec.mock.calls;
+    const installIdx = allCalls.findIndex(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "install",
+    );
     const buildIdx = allCalls.findIndex(
       (c) => c[0] === "npm" && (c[1] as string[])[0] === "run",
     );
@@ -121,8 +128,10 @@ describe("squashMerge — trial merge succeeds", () => {
       (c) =>
         c[0] === "git" && (c[1] as string[])[0] === "commit",
     );
+    expect(installIdx).toBeGreaterThan(-1);
     expect(buildIdx).toBeGreaterThan(-1);
     expect(commitIdx).toBeGreaterThan(-1);
+    expect(installIdx).toBeLessThan(buildIdx);
     expect(buildIdx).toBeLessThan(commitIdx);
   });
 });
@@ -132,7 +141,8 @@ describe("squashMerge — trial merge succeeds", () => {
 describe("squashMerge — build failure", () => {
   it("aborts merge and throws when build fails", async () => {
     mockExec.mockImplementation((cmd, args) => {
-      if (cmd === "npm") {
+      const a = args as string[];
+      if (cmd === "npm" && a[0] === "run") {
         throw Object.assign(new Error("build failed"), {
           stderr: "tsc error TS2304",
         });
@@ -253,6 +263,73 @@ describe("squashMerge — package.json conflict resolution", () => {
 
     // Should stage package-lock.json after npm install
     expect(calls).toContainEqual(["add", "package-lock.json"]);
+  });
+});
+
+// ─── squashMerge: no package.json (non-npm project) ─────────────────────────
+
+describe("squashMerge — no package.json", () => {
+  it("skips build validation when no package.json", async () => {
+    mockExistsSync.mockReturnValue(false);
+
+    await squashMerge(7, "proj", "feat/x", "chore: no-npm", false);
+
+    // No npm calls at all
+    expect(npmCalls()).toHaveLength(0);
+
+    // But commit still happens
+    expect(gitCalls()).toContainEqual(["commit", "-m", "chore: no-npm"]);
+  });
+});
+
+// ─── squashMerge: npm install failure ───────────────────────────────────────
+
+describe("squashMerge — npm install failure", () => {
+  it("throws when npm install fails", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "npm" && a[0] === "install") {
+        throw Object.assign(new Error("install failed"), {
+          stderr: "npm ERR! code ERESOLVE",
+        });
+      }
+      return "";
+    });
+
+    await expect(
+      squashMerge(8, "proj", "feat/x", "feat: bad-deps", false),
+    ).rejects.toThrow(/Dependency installation.*fail/);
+
+    // Should NOT have committed
+    expect(gitCalls().find((c) => c[0] === "commit")).toBeUndefined();
+  });
+});
+
+// ─── squashMerge: lockfile staging order ────────────────────────────────────
+
+describe("squashMerge — lockfile staging", () => {
+  it("stages package-lock.json after npm install and before build", async () => {
+    await squashMerge(9, "proj", "feat/x", "chore: lock", false);
+
+    const allCalls = mockExec.mock.calls;
+    const installIdx = allCalls.findIndex(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "install",
+    );
+    const addLockIdx = allCalls.findIndex(
+      (c) =>
+        c[0] === "git" &&
+        (c[1] as string[])[0] === "add" &&
+        (c[1] as string[])[1] === "package-lock.json",
+    );
+    const buildIdx = allCalls.findIndex(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "run",
+    );
+
+    expect(installIdx).toBeGreaterThan(-1);
+    expect(addLockIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeGreaterThan(-1);
+    expect(installIdx).toBeLessThan(addLockIdx);
+    expect(addLockIdx).toBeLessThan(buildIdx);
   });
 });
 
