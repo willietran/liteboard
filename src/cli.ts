@@ -18,7 +18,7 @@ import {
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
-import { renderStatus, HIDE_CURSOR, SHOW_CURSOR } from "./dashboard.js";
+import { renderStatus, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
 import { buildBrief } from "./brief.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -278,7 +278,7 @@ async function main(): Promise<void> {
   let shuttingDown = false;
 
   // Dashboard interval
-  process.stdout.write(HIDE_CURSOR);
+  process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
   const dashboardInterval = setInterval(() => {
     renderStatus(filteredTasks, args.projectPath);
   }, 1000);

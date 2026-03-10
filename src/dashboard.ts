@@ -2,9 +2,11 @@ import type { Task } from "./types.js";
 
 export const HIDE_CURSOR = "\x1b[?25l";
 export const SHOW_CURSOR = "\x1b[?25h";
+export const CLEAR_SCREEN = "\x1b[2J";
 
 const CURSOR_HOME = "\x1b[H";
-const CLEAR_LINE = "\x1b[2K";
+const CLEAR_TO_EOL = "\x1b[K";
+const CLEAR_BELOW = "\x1b[J";
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
@@ -29,6 +31,7 @@ function truncate(s: string, maxLen: number): string {
 }
 
 export function renderStatus(tasks: Task[], projectDir: string): void {
+  const cols = process.stdout.columns || 80;
   const total = tasks.length;
   const done = tasks.filter((t) => t.status === "done").length;
   const failed = tasks.filter((t) => t.status === "failed").length;
@@ -39,7 +42,7 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   const lines: string[] = [];
 
   // Progress bar
-  const barWidth = 30;
+  const barWidth = Math.min(40, cols - 30);
   const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
   const bar = "\u2588".repeat(filled) + "\u2591".repeat(barWidth - filled);
   const failStr = failed > 0 ? ` ${RED}${failed} failed${RESET}` : "";
@@ -53,11 +56,11 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
     lines.push(`${BOLD}${CYAN}Running (${running.length}):${RESET}`);
     for (const t of running) {
       const elapsed = formatElapsed(t.startedAt);
-      const kb = (t.bytesReceived / 1024).toFixed(1);
-      const title = truncate(t.title, 30);
-      const last = truncate(t.lastLine || "...", 50);
+      const kb = (t.bytesReceived / 1024).toFixed(0);
+      const title = truncate(t.title, 35);
+      const last = truncate(t.lastLine || "...", cols - 55);
       lines.push(
-        `  ${CYAN}T${t.id}${RESET} ${title} ${DIM}\u2502${RESET} turns: ${t.turnCount} \u2502 ${elapsed} \u2502 ${kb}KB \u2502 ${GRAY}${last}${RESET}`,
+        `  ${CYAN}T${t.id}${RESET} ${title} ${GRAY}turns:${t.turnCount} ${elapsed} ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
       );
     }
     lines.push("");
@@ -66,37 +69,37 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   // Status lists
   if (queued.length > 0)
     lines.push(
-      `${YELLOW}Queued (${queued.length}):${RESET} ${queued.map((t) => `T${t.id}`).join(", ")}`,
+      `${YELLOW}Queued (${queued.length}):${RESET} ${DIM}${queued.map((t) => `T${t.id}`).join(", ")}${RESET}`,
     );
   if (blocked.length > 0)
     lines.push(
-      `${DIM}Blocked (${blocked.length}):${RESET} ${blocked.map((t) => `T${t.id}`).join(", ")}`,
+      `${GRAY}Blocked (${blocked.length}):${RESET} ${DIM}${blocked.map((t) => `T${t.id}`).join(", ")}${RESET}`,
     );
   if (done > 0)
     lines.push(
-      `${GREEN}Done (${done}):${RESET} ${tasks
+      `${GREEN}Done (${done}):${RESET} ${DIM}${tasks
         .filter((t) => t.status === "done")
         .map((t) => `T${t.id}`)
-        .join(", ")}`,
+        .join(", ")}${RESET}`,
     );
-  if (failed > 0)
-    lines.push(
-      `${RED}Failed (${failed}):${RESET} ${tasks
-        .filter((t) => t.status === "failed")
-        .map((t) => `T${t.id}`)
-        .join(", ")}`,
-    );
-
-  if (running.length > 0) {
-    lines.push("");
-    lines.push(
-      `${DIM}Logs: ${projectDir}/logs/t{${running.map((t) => t.id).join(",")}}.jsonl${RESET}`,
-    );
+  if (failed > 0) {
+    lines.push(`${RED}Failed (${failed}):${RESET}`);
+    for (const t of tasks.filter((t) => t.status === "failed")) {
+      lines.push(
+        `  ${RED}T${t.id}${RESET} ${t.title}  ${DIM}${truncate(t.lastLine, cols - 40)}${RESET}`,
+      );
+    }
   }
 
-  let output = CURSOR_HOME;
-  for (const line of lines) output += CLEAR_LINE + line + "\n";
-  // Clear any leftover lines from previous renders
-  for (let i = 0; i < 10; i++) output += CLEAR_LINE + "\n";
+  lines.push("");
+  lines.push(
+    `${DIM}Logs: ${projectDir}/logs/t<N>.jsonl  (tail -f to watch)${RESET}`,
+  );
+
+  // Render: content first, then clear-to-EOL — matches docs/run.ts pattern
+  const output = CURSOR_HOME
+    + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
+    + "\n"
+    + CLEAR_BELOW;
   process.stdout.write(output);
 }
