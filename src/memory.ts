@@ -1,14 +1,15 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { createMutex } from "./mutex.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const MEMORY_FILE = "memory.md";
 const HEADER = "# Liteboard Memory Log\n\n";
 
-// ─── Mutex (promise-chain lock) ─────────────────────────────────────────────
+// ─── Mutex ──────────────────────────────────────────────────────────────────
 
-let writeLock: Promise<void> = Promise.resolve();
+const serialize = createMutex();
 
 // ─── appendMemoryEntry ──────────────────────────────────────────────────────
 
@@ -18,13 +19,7 @@ export async function appendMemoryEntry(
   title: string,
   body: string,
 ): Promise<void> {
-  const prev = writeLock;
-  let resolve: () => void;
-  writeLock = new Promise<void>((r) => {
-    resolve = r;
-  });
-  await prev;
-  try {
+  return serialize(async () => {
     const memoryPath = join(projectDir, MEMORY_FILE);
     const tempPath = join(projectDir, `${MEMORY_FILE}.tmp`);
 
@@ -46,9 +41,7 @@ export async function appendMemoryEntry(
     // Atomic write: write to temp file, then rename
     writeFileSync(tempPath, content, "utf-8");
     renameSync(tempPath, memoryPath);
-  } finally {
-    resolve!();
-  }
+  });
 }
 
 // ─── readMemorySnapshot ─────────────────────────────────────────────────────

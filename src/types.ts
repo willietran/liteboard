@@ -27,6 +27,10 @@ export const VALID_STAGE_MARKERS: ReadonlySet<string> = new Set([
   "Code Review", "Committing",
 ]);
 
+// ─── TDD Phase ──────────────────────────────────────────────────────────
+
+export type TddPhase = "RED" | "GREEN" | "RED \u2192 GREEN" | "Exempt" | "";
+
 // ─── Task ─────────────────────────────────────────────────────────────────
 
 export interface Task {
@@ -36,7 +40,7 @@ export interface Task {
   modifies: string[];
   dependsOn: number[];
   requirements: string[];
-  tddPhase: string;
+  tddPhase: TddPhase;
   commitMessage: string;
   complexity: number;
   status: TaskStatus;

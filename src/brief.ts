@@ -11,8 +11,8 @@ function readCommand(filename: string): string {
   const filePath = path.join(commandsDir, filename);
   try {
     return fs.readFileSync(filePath, "utf-8");
-  } catch (e: any) {
-    if (e.code === "ENOENT") {
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
       throw new Error(`Missing command file: ${filename}. Expected at ${filePath}. Is liteboard installed correctly?`);
     }
     throw e;

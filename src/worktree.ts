@@ -1,27 +1,13 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import type { Task } from "./types.js";
-
-// ─── git helper ─────────────────────────────────────────────────────────────
-
-export function git(
-  args: string[],
-  opts?: { cwd?: string; verbose?: boolean },
-): string {
-  if (opts?.verbose) {
-    console.log(`[worktree] git ${args.join(" ")}`);
-  }
-  const result = execFileSync("git", args, {
-    encoding: "utf-8",
-    cwd: opts?.cwd,
-  });
-  return typeof result === "string" ? result.trim() : String(result).trim();
-}
+import { git } from "./git.js";
 
 // ─── getWorktreePath ────────────────────────────────────────────────────────
 
 export function getWorktreePath(slug: string, taskId: number): string {
-  return `/tmp/liteboard-${slug}-t${taskId}`;
+  return path.join(tmpdir(), `liteboard-${slug}-t${taskId}`);
 }
 
 // ─── setupFeatureBranch ─────────────────────────────────────────────────────
@@ -122,7 +108,7 @@ export function cleanupStaleWorktrees(
   slug: string,
   verbose: boolean,
 ): void {
-  const pattern = `/tmp/liteboard-${slug}-`;
+  const pattern = path.join(tmpdir(), `liteboard-${slug}-`);
   let output: string;
 
   try {

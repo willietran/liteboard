@@ -4,9 +4,18 @@ import type { ChildProcess } from "node:child_process";
 import type { Task, Provider, StreamEvent, TaskStage } from "./types.js";
 import { VALID_STAGE_MARKERS } from "./types.js";
 
-const STARTUP_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
-const STALL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const STALL_CHECK_INTERVAL_MS = 15 * 1000; // 15 seconds
+/** Grace period for agent startup. Claude Code can take up to ~60s to initialize;
+ *  2 minutes gives margin for API cold starts and network latency. */
+const STARTUP_TIMEOUT_MS = 2 * 60 * 1000;
+
+/** Maximum silence during an active task. 5 minutes balances tolerating
+ *  slow tool calls (large file writes, npm installs) against detecting
+ *  genuine hangs from API rate limits or deadlocked processes. */
+const STALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Polling interval for stall detection. 15 seconds keeps CPU overhead
+ *  negligible while detecting stalls within one check window of the timeout. */
+const STALL_CHECK_INTERVAL_MS = 15 * 1000;
 
 export function spawnAgent(
   task: Task,

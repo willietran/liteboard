@@ -50,7 +50,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     modifies: [],
     dependsOn: [],
     requirements: ["Export buildBrief function", "Read commands/*.md files"],
-    tddPhase: "RED → GREEN → REFACTOR",
+    tddPhase: "RED → GREEN",
     commitMessage: "feat(brief): add brief assembler",
     complexity: 3,
     status: "queued",
@@ -70,7 +70,7 @@ function makeDepTask(overrides: Partial<Task> = {}): Task {
     modifies: [],
     dependsOn: [],
     requirements: [],
-    tddPhase: "RED → GREEN → REFACTOR",
+    tddPhase: "RED → GREEN",
     commitMessage: "feat(memory): add memory module",
     complexity: 2,
     status: "done",
@@ -215,10 +215,10 @@ describe("buildBrief", () => {
   });
 
   it("includes TDD phase in workflow when set", () => {
-    const task = makeTask({ tddPhase: "RED → GREEN → REFACTOR" });
+    const task = makeTask({ tddPhase: "RED → GREEN" });
     const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
 
-    expect(brief).toContain("RED → GREEN → REFACTOR");
+    expect(brief).toContain("RED → GREEN");
   });
 
   it("throws descriptive error when a command file is missing", () => {

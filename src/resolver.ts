@@ -102,13 +102,16 @@ function splitConflicts(
   const subLayers: number[][] = [];
 
   for (const id of ids) {
-    const task = taskMap.get(id)!;
+    const task = taskMap.get(id);
+    if (!task) throw new Error(`splitConflicts: task ${id} not found in taskMap`);
     let placed = false;
 
     for (const sub of subLayers) {
-      const conflicts = sub.some((existingId) =>
-        hasFileConflict(taskMap.get(existingId)!, task)
-      );
+      const conflicts = sub.some((existingId) => {
+        const existing = taskMap.get(existingId);
+        if (!existing) throw new Error(`splitConflicts: task ${existingId} not found in taskMap`);
+        return hasFileConflict(existing, task);
+      });
       if (!conflicts) {
         sub.push(id);
         placed = true;

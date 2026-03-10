@@ -1,5 +1,9 @@
 import { readFileSync } from "node:fs";
-import type { Task } from "./types.js";
+import type { Task, TddPhase } from "./types.js";
+
+const VALID_TDD_PHASES: ReadonlySet<string> = new Set([
+  "RED", "GREEN", "RED \u2192 GREEN", "Exempt",
+]);
 
 // ─── Field Parsers ───────────────────────────────────────────────────────────
 
@@ -94,7 +98,7 @@ export function parseManifest(manifestPath: string): Task[] {
       modifies: parseFileList(section, "Modifies"),
       dependsOn,
       requirements: parseRequirements(section),
-      tddPhase: parseSingleValue(section, "TDD Phase"),
+      tddPhase: normalizeTddPhase(parseSingleValue(section, "TDD Phase")),
       commitMessage: parseSingleValue(section, "Commit"),
       complexity: isNaN(complexity) ? 0 : complexity,
       status: dependsOn.length === 0 ? "queued" : "blocked",
@@ -107,5 +111,52 @@ export function parseManifest(manifestPath: string): Task[] {
     tasks.push(task);
   }
 
+  validateManifest(tasks);
   return tasks;
+}
+
+// ─── TDD Phase Normalization ────────────────────────────────────────────────
+
+function normalizeTddPhase(raw: string): TddPhase {
+  if (!raw) return "";
+  if (VALID_TDD_PHASES.has(raw)) return raw as TddPhase;
+  // Try uppercase normalization
+  const upper = raw.toUpperCase();
+  for (const valid of VALID_TDD_PHASES) {
+    if (upper === valid.toUpperCase()) return valid as TddPhase;
+  }
+  return "";
+}
+
+// ─── Validation ──────────────────────────────────────────────────────────────
+
+function validateManifest(tasks: Task[]): void {
+  // Check for duplicate IDs
+  const seen = new Set<number>();
+  for (const t of tasks) {
+    if (seen.has(t.id)) {
+      throw new Error(`Duplicate task ID: ${t.id}`);
+    }
+    seen.add(t.id);
+  }
+
+  // Check for dangling dependency references
+  for (const t of tasks) {
+    for (const depId of t.dependsOn) {
+      if (!seen.has(depId)) {
+        throw new Error(
+          `Task ${t.id} depends on Task ${depId}, which does not exist in the manifest`,
+        );
+      }
+    }
+  }
+
+  // Warn about out-of-range complexity
+  for (const t of tasks) {
+    if (t.complexity < 0 || t.complexity > 10) {
+      console.error(
+        `\x1b[33mWarning: Task ${t.id} has complexity ${t.complexity} (expected 0–10)\x1b[0m`,
+      );
+    }
+  }
 }

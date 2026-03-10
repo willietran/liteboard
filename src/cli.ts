@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task } from "./types.js";
+import type { Task, CLIArgs } from "./types.js";
 import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
@@ -28,23 +28,14 @@ function die(msg: string): never {
   process.exit(1);
 }
 
+// Logs to stderr intentionally — stdout is reserved for the dashboard TUI rendering.
 function log(msg: string): void {
   console.error(msg);
 }
 
 // ─── CLI Argument Parsing ────────────────────────────────────────────────
 
-interface ParsedArgs {
-  projectPath: string;
-  concurrency: number;
-  model: string;
-  branch: string;
-  taskFilter: number[] | null;
-  dryRun: boolean;
-  verbose: boolean;
-}
-
-function parseArgs(): ParsedArgs {
+function parseArgs(): CLIArgs {
   const args = process.argv.slice(2);
 
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
@@ -110,7 +101,7 @@ Options:
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
 
-function checkPrereqs(args: ParsedArgs): void {
+function checkPrereqs(args: CLIArgs): void {
   try {
     execFileSync("git", ["rev-parse", "--git-dir"], { stdio: "pipe" });
   } catch {
@@ -255,10 +246,11 @@ async function main(): Promise<void> {
 
   // Unblock tasks whose deps are all done
   function updateStatuses(): void {
+    const taskById = new Map(filteredTasks.map(t => [t.id, t]));
     for (const t of filteredTasks) {
       if (t.status === "blocked") {
         const allDepsDone = t.dependsOn.every(depId => {
-          const dep = filteredTasks.find(d => d.id === depId);
+          const dep = taskById.get(depId);
           return dep?.status === "done";
         });
         if (allDepsDone) t.status = "queued";
@@ -310,12 +302,24 @@ async function main(): Promise<void> {
     task.status = "running";
     task.startedAt = new Date().toISOString();
 
-    const wp = createWorktree(slug, task.id, args.branch, args.verbose);
-    task.worktreePath = wp;
+    let wp: string;
+    let child: ReturnType<typeof spawnAgent>;
+    try {
+      wp = createWorktree(slug, task.id, args.branch, args.verbose);
+      task.worktreePath = wp;
 
-    const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch);
-    const child = spawnAgent(task, brief, provider, args.model, wp, args.projectPath, args.verbose);
-    task.process = child;
+      const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch);
+      child = spawnAgent(task, brief, provider, args.model, wp, args.projectPath, args.verbose);
+      task.process = child;
+    } catch (e: unknown) {
+      task.status = "failed";
+      task.stage = "";
+      task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+      cleanupWorktree(slug, task.id, args.branch, args.verbose);
+      writeProgress(filteredTasks, args.projectPath);
+      updateStatuses();
+      return;
+    }
 
     const promise = new Promise<void>((resolve) => {
       child.on("close", async (code) => {
@@ -340,10 +344,10 @@ async function main(): Promise<void> {
             task.status = "done";
             task.stage = "";
             task.completedAt = new Date().toISOString();
-          } catch (e: any) {
+          } catch (e: unknown) {
             task.status = "failed";
             task.stage = "";
-            task.lastLine = `[MERGE FAILED] ${e.message?.slice(0, 100) || "unknown error"}`;
+            task.lastLine = `[MERGE FAILED] ${(e instanceof Error ? e.message : String(e)).slice(0, 100)}`;
           }
         } else {
           task.status = "failed";
@@ -377,9 +381,10 @@ async function main(): Promise<void> {
     if (runningTasks.length === 0 && queuedTasks.length === 0) {
       if (blockedTasks.length > 0) {
         log("\x1b[31mStuck: blocked tasks remain but nothing is running or queued.\x1b[0m");
+        const taskById = new Map(filteredTasks.map(t => [t.id, t]));
         for (const t of blockedTasks) {
           const missingDeps = t.dependsOn.filter(d => {
-            const dep = filteredTasks.find(dt => dt.id === d);
+            const dep = taskById.get(d);
             return dep && dep.status === "failed";
           });
           if (missingDeps.length > 0) {

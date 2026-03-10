@@ -11,7 +11,7 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
     modifies: [],
     dependsOn: [],
     requirements: [],
-    tddPhase: "green",
+    tddPhase: "GREEN",
     commitMessage: "",
     complexity: 1,
     status: "blocked",

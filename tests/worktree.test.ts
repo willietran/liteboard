@@ -12,10 +12,28 @@ vi.mock("node:fs", () => ({
   rmSync: vi.fn(),
 }));
 
+vi.mock("node:os", () => ({
+  tmpdir: vi.fn(() => "/tmp"),
+}));
+
+// Mock the git module — worktree.ts imports git from ./git.js
+// We re-export the mock so worktree functions use the same mock execFileSync
+vi.mock("../src/git.js", async () => {
+  const { execFileSync } = await import("node:child_process");
+  return {
+    git: (args: string[], opts?: { cwd?: string; verbose?: boolean }) => {
+      const result = execFileSync("git", args, {
+        encoding: "utf-8",
+        cwd: opts?.cwd,
+      });
+      return typeof result === "string" ? result.trim() : String(result).trim();
+    },
+  };
+});
+
 import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import {
-  git,
   setupFeatureBranch,
   createWorktree,
   cleanupWorktree,
@@ -37,7 +55,7 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
     modifies: [],
     dependsOn: [],
     requirements: [],
-    tddPhase: "green",
+    tddPhase: "GREEN",
     commitMessage: "",
     complexity: 1,
     status: "blocked",
@@ -54,48 +72,6 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
 beforeEach(() => {
   vi.clearAllMocks();
   mockExec.mockReturnValue(Buffer.from(""));
-});
-
-// ─── git helper ─────────────────────────────────────────────────────────────
-
-describe("git", () => {
-  it("executes git command with correct args", () => {
-    git(["status", "--short"]);
-
-    expect(mockExec).toHaveBeenCalledWith(
-      "git",
-      ["status", "--short"],
-      expect.objectContaining({ encoding: "utf-8" }),
-    );
-  });
-
-  it("passes cwd option to execFileSync", () => {
-    git(["log"], { cwd: "/some/path" });
-
-    expect(mockExec).toHaveBeenCalledWith(
-      "git",
-      ["log"],
-      expect.objectContaining({ cwd: "/some/path", encoding: "utf-8" }),
-    );
-  });
-
-  it("logs when verbose is true", () => {
-    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
-    git(["branch", "-a"], { verbose: true });
-
-    expect(spy).toHaveBeenCalledWith(
-      expect.stringContaining("git branch -a"),
-    );
-    spy.mockRestore();
-  });
-
-  it("does not log when verbose is false", () => {
-    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
-    git(["branch", "-a"], { verbose: false });
-
-    expect(spy).not.toHaveBeenCalled();
-    spy.mockRestore();
-  });
 });
 
 // ─── setupFeatureBranch ─────────────────────────────────────────────────────
