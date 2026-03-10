@@ -329,6 +329,7 @@ async function main(): Promise<void> {
             }
 
             // Squash merge
+            task.stage = "Merging";
             await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
 
             // Append memory AFTER successful merge
@@ -337,13 +338,16 @@ async function main(): Promise<void> {
             }
 
             task.status = "done";
+            task.stage = "";
             task.completedAt = new Date().toISOString();
           } catch (e: any) {
             task.status = "failed";
+            task.stage = "";
             task.lastLine = `[MERGE FAILED] ${e.message?.slice(0, 100) || "unknown error"}`;
           }
         } else {
           task.status = "failed";
+          task.stage = "";
           task.lastLine = task.lastLine || `[EXIT ${code}]`;
         }
 

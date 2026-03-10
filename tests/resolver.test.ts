@@ -15,6 +15,7 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
     commitMessage: "",
     complexity: 1,
     status: "blocked",
+    stage: "",
     turnCount: 0,
     lastLine: "",
     bytesReceived: 0,

@@ -59,9 +59,13 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
       const kb = (t.bytesReceived / 1024).toFixed(0);
       const title = truncate(t.title, 35);
       const turnLabel = t.turnCount === 1 ? "turn" : "turns";
-      const last = truncate(t.lastLine || "starting...", cols - 55);
+      const stageLabel = t.stage
+        ? ` ${YELLOW}${t.stage}${RESET}`
+        : (t.bytesReceived > 0 ? ` ${GRAY}Working...${RESET}` : "");
+      const stageWidth = t.stage ? t.stage.length + 1 : (t.bytesReceived > 0 ? 11 : 0);
+      const last = truncate(t.lastLine || "starting...", cols - 55 - stageWidth);
       lines.push(
-        `  ${CYAN}T${t.id}${RESET} ${title}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
+        `  ${CYAN}T${t.id}${RESET} ${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
       );
     }
     lines.push("");

@@ -9,6 +9,24 @@ export type TaskStatus =
   | "done"
   | "failed";
 
+// ─── Task Stage ──────────────────────────────────────────────────────────
+
+export type TaskStage =
+  | ""
+  | "Exploring"
+  | "Planning"
+  | "Plan Review"
+  | "Implementing"
+  | "Code Review"
+  | "Committing"
+  | "Merging";
+
+// "Merging" is intentionally excluded — it is set by cli.ts, not parsed from agent output.
+export const VALID_STAGE_MARKERS: ReadonlySet<string> = new Set([
+  "Exploring", "Planning", "Plan Review", "Implementing",
+  "Code Review", "Committing",
+]);
+
 // ─── Task ─────────────────────────────────────────────────────────────────
 
 export interface Task {
@@ -22,6 +40,7 @@ export interface Task {
   commitMessage: string;
   complexity: number;
   status: TaskStatus;
+  stage: TaskStage;
   turnCount: number;
   lastLine: string;
   bytesReceived: number;

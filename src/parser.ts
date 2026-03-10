@@ -98,6 +98,7 @@ export function parseManifest(manifestPath: string): Task[] {
       commitMessage: parseSingleValue(section, "Commit"),
       complexity: isNaN(complexity) ? 0 : complexity,
       status: dependsOn.length === 0 ? "queued" : "blocked",
+      stage: "",
       turnCount: 0,
       lastLine: "",
       bytesReceived: 0,

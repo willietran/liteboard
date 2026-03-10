@@ -36,6 +36,7 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
     commitMessage: "",
     complexity: 1,
     status: "running",
+    stage: "",
     turnCount: 0,
     lastLine: "",
     bytesReceived: 0,
@@ -182,6 +183,79 @@ describe("spawnAgent", () => {
     child.stdout!.emit("data", Buffer.from("chunk"));
 
     expect(task.lastLine).toBe("Hello world foo bar");
+  });
+
+  // ── Stage marker parsing ───────────────────────────────────────────────
+
+  it("sets task.stage from [STAGE: X] marker in text_delta", () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child, [
+      { type: "text_delta", text: "[STAGE: Exploring]\n" },
+    ]);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("chunk"));
+
+    expect(task.stage).toBe("Exploring");
+  });
+
+  it("ignores invalid stage marker values", () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child, [
+      { type: "text_delta", text: "[STAGE: InvalidPhase]\n" },
+    ]);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("chunk"));
+
+    expect(task.stage).toBe("");
+  });
+
+  it("strips stage markers from lastLine", () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child, [
+      { type: "text_delta", text: "[STAGE: Planning] Starting plan work\n" },
+    ]);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("chunk"));
+
+    expect(task.stage).toBe("Planning");
+    expect(task.lastLine).toBe("Starting plan work");
+    expect(task.lastLine).not.toContain("[STAGE:");
+  });
+
+  it("does not change task.stage for text_delta without stage marker", () => {
+    const task = makeTask({ id: 1, stage: "Exploring" });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child, [
+      { type: "text_delta", text: "Just some regular text\n" },
+    ]);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("chunk"));
+
+    expect(task.stage).toBe("Exploring");
+  });
+
+  it("uses the last stage marker when accumulated text has multiple markers", () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    // stream-json sends accumulated text — later deltas contain all prior text
+    // So after a stage transition, the text has both old and new markers
+    const provider = makeMockProvider(child, [
+      { type: "text_delta", text: "[STAGE: Exploring]\nreading files...\n[STAGE: Planning]\nwriting plan...\n" },
+    ]);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("chunk"));
+
+    // Must pick the LAST marker, not the first
+    expect(task.stage).toBe("Planning");
+    expect(task.lastLine).toBe("writing plan...");
   });
 
   // ── 6. Sets lastLine to [using toolName] on tool_use_start ─────────────

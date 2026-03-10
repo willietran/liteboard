@@ -38,6 +38,7 @@ function makeTask(overrides: Partial<Task> & { id: number; title: string }): Tas
     commitMessage: `implement task ${overrides.id}`,
     complexity: 1,
     status: "queued" as TaskStatus,
+    stage: "",
     turnCount: 0,
     lastLine: "",
     bytesReceived: 0,

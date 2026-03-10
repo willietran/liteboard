@@ -417,5 +417,11 @@ describe("parseManifest", () => {
       const tasks = parseManifest(manifestPath);
       expect(tasks[0].bytesReceived).toBe(0);
     });
+
+    it("sets stage to empty string", () => {
+      const manifestPath = writeTmpManifest("defaults4.md", SAMPLE_MANIFEST);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].stage).toBe("");
+    });
   });
 });

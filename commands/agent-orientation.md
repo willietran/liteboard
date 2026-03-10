@@ -12,6 +12,10 @@ Every task moves through these phases in order. Do not skip or reorder them.
 4. **Implement** -- Execute the approved plan. Follow plan execution discipline (below).
 5. **Code Review & Commit** -- Submit the diff for review (see `commands/session-review.md`). Address feedback. Max 3 review rounds. Once approved, commit using the exact commit message provided.
 
+**Stage markers:** At the start of each phase, output a stage marker on its own line:
+`[STAGE: Exploring]`, `[STAGE: Planning]`, `[STAGE: Plan Review]`, `[STAGE: Implementing]`, `[STAGE: Code Review]`, `[STAGE: Committing]`
+These markers are parsed by the orchestrator dashboard. Do not skip them.
+
 ## Spawning Subagents
 
 - **Explore subagent**: Use the Agent tool with `subagent_type="Explore"` to search, read, and analyze code without making changes.

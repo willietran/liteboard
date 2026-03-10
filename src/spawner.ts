@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ChildProcess } from "node:child_process";
-import type { Task, Provider, StreamEvent } from "./types.js";
+import type { Task, Provider, StreamEvent, TaskStage } from "./types.js";
+import { VALID_STAGE_MARKERS } from "./types.js";
 
 const STARTUP_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 const STALL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -47,7 +48,18 @@ export function spawnAgent(
         task.turnCount++;
       } else if (evt.type === "text_delta") {
         const stripped = evt.text.replace(/[#*`_~]/g, "").trim();
-        const lines = stripped.split("\n").filter(Boolean);
+
+        // Parse stage markers — use matchAll to find the LAST marker,
+        // since text_delta contains accumulated text (not just new delta)
+        const stageMatches = [...stripped.matchAll(/\[STAGE:\s*(.+?)\]/g)];
+        const lastStageMatch = stageMatches[stageMatches.length - 1];
+        if (lastStageMatch && VALID_STAGE_MARKERS.has(lastStageMatch[1])) {
+          task.stage = lastStageMatch[1] as TaskStage;
+        }
+
+        // Filter stage markers from lastLine
+        const forLastLine = stripped.replace(/\[STAGE:\s*.+?\]/g, "").trim();
+        const lines = forLastLine.split("\n").filter(Boolean);
         const last = lines[lines.length - 1];
         if (last) {
           task.lastLine = last.slice(0, 120);
