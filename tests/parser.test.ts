@@ -307,6 +307,28 @@ describe("parseManifest", () => {
       const tasks = parseManifest(manifestPath);
       expect(tasks[0].tddPhase).toBe("RED → GREEN");
     });
+
+    it("normalizes ASCII arrows to unicode in TDD phase", () => {
+      const manifest = `
+### Task 1: ASCII arrows
+
+**TDD Phase:** RED -> GREEN -> REFACTOR
+`.trimStart();
+      const manifestPath = writeTmpManifest("ascii-arrows-tdd.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].tddPhase).toBe("RED \u2192 GREEN \u2192 REFACTOR");
+    });
+
+    it("parses RED -> GREEN -> REFACTOR as valid TDD phase", () => {
+      const manifest = `
+### Task 1: Full TDD
+
+**TDD Phase:** RED \u2192 GREEN \u2192 REFACTOR
+`.trimStart();
+      const manifestPath = writeTmpManifest("full-tdd.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].tddPhase).toBe("RED \u2192 GREEN \u2192 REFACTOR");
+    });
   });
 
   // ── 6. Single-value fields ────────────────────────────────────────────

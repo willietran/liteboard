@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import type { Task, TddPhase } from "./types.js";
 
 const VALID_TDD_PHASES: ReadonlySet<string> = new Set([
-  "RED", "GREEN", "RED \u2192 GREEN", "Exempt",
+  "RED", "GREEN", "RED \u2192 GREEN", "RED \u2192 GREEN \u2192 REFACTOR", "Exempt",
 ]);
 
 // ─── Field Parsers ───────────────────────────────────────────────────────────
@@ -119,9 +119,11 @@ export function parseManifest(manifestPath: string): Task[] {
 
 function normalizeTddPhase(raw: string): TddPhase {
   if (!raw) return "";
-  if (VALID_TDD_PHASES.has(raw)) return raw as TddPhase;
+  // Normalize ASCII arrows (-> ) to unicode arrows (→) before matching
+  const normalized = raw.replace(/->/g, "→").replace(/\s+/g, " ").trim();
+  if (VALID_TDD_PHASES.has(normalized)) return normalized as TddPhase;
   // Try uppercase normalization
-  const upper = raw.toUpperCase();
+  const upper = normalized.toUpperCase();
   for (const valid of VALID_TDD_PHASES) {
     if (upper === valid.toUpperCase()) return valid as TddPhase;
   }

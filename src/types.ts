@@ -29,7 +29,7 @@ export const VALID_STAGE_MARKERS: ReadonlySet<string> = new Set([
 
 // ─── TDD Phase ──────────────────────────────────────────────────────────
 
-export type TddPhase = "RED" | "GREEN" | "RED \u2192 GREEN" | "Exempt" | "";
+export type TddPhase = "RED" | "GREEN" | "RED \u2192 GREEN" | "RED \u2192 GREEN \u2192 REFACTOR" | "Exempt" | "";
 
 // ─── Task ─────────────────────────────────────────────────────────────────
 
