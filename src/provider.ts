@@ -33,6 +33,7 @@ export class ClaudeCodeProvider implements Provider {
   /** Creates an independent stream parser with its own buffer. */
   createStreamParser(): StreamParser {
     let buffer = "";
+    let lastMessageId = "";
     return (chunk: Buffer): StreamEvent[] => {
       const events: StreamEvent[] = [];
 
@@ -54,10 +55,10 @@ export class ClaudeCodeProvider implements Provider {
           continue;
         }
 
-        const event = this.mapEvent(parsed);
-        if (event) {
-          events.push(event);
-        }
+        const mapped = this.mapEvent(parsed, lastMessageId);
+        const msgId = this.extractMessageId(parsed);
+        if (msgId) lastMessageId = msgId;
+        events.push(...mapped);
       }
 
       return events;
@@ -85,57 +86,84 @@ export class ClaudeCodeProvider implements Provider {
 
   // ── Private helpers ────────────────────────────────────────────────────
 
-  private mapEvent(raw: Record<string, unknown>): StreamEvent | null {
+  /**
+   * Maps a Claude Code stream-json envelope to StreamEvent(s).
+   *
+   * Claude Code's `--output-format stream-json` emits envelopes like:
+   *   { type: "assistant", message: { id, content: [...], stop_reason } }
+   *   { type: "user", message: { content: [{ type: "tool_result", ... }] } }
+   *   { type: "system" | "result" | "rate_limit_event" }
+   *   { type: "error", error: { message } }
+   */
+  private mapEvent(
+    raw: Record<string, unknown>,
+    lastMessageId: string,
+  ): StreamEvent[] {
     switch (raw.type) {
-      case "message_start": {
+      case "assistant": {
         const message = raw.message as
-          | { turn_index?: number }
+          | {
+              id?: string;
+              content?: Array<{ type: string; text?: string; name?: string }>;
+              stop_reason?: string | null;
+            }
           | undefined;
-        return {
-          type: "message_start",
-          turnIndex: message?.turn_index ?? 0,
-        };
-      }
+        if (!message) return [];
 
-      case "content_block_delta": {
-        const delta = raw.delta as
-          | { type?: string; text?: string }
-          | undefined;
-        if (delta?.type === "text_delta" && delta.text !== undefined) {
-          return { type: "text_delta", text: delta.text };
+        const events: StreamEvent[] = [];
+
+        // New turn when message ID changes
+        const msgId = this.extractMessageId(raw);
+        if (msgId && msgId !== lastMessageId) {
+          events.push({ type: "message_start", turnIndex: 0 });
         }
-        return null;
-      }
 
-      case "content_block_start": {
-        const block = raw.content_block as
-          | { type?: string; name?: string }
-          | undefined;
-        if (block?.type === "tool_use" && block.name) {
-          return { type: "tool_use_start", toolName: block.name };
+        // Emit events for each content block
+        if (Array.isArray(message.content)) {
+          for (const block of message.content) {
+            if (block.type === "text" && block.text !== undefined) {
+              events.push({ type: "text_delta", text: block.text });
+            } else if (block.type === "tool_use" && block.name) {
+              events.push({ type: "tool_use_start", toolName: block.name });
+            }
+          }
         }
-        return null;
+
+        // Message complete when stop_reason is set
+        if (message.stop_reason) {
+          events.push({ type: "message_end" });
+        }
+
+        return events;
       }
 
-      case "content_block_stop": {
-        return { type: "tool_use_end" };
-      }
-
-      case "message_stop": {
-        return { type: "message_end" };
+      case "user": {
+        return [{ type: "tool_use_end" }];
       }
 
       case "error": {
         const error = raw.error as { message?: string } | undefined;
-        return {
-          type: "error",
-          message: error?.message ?? "Unknown error",
-        };
+        return [
+          {
+            type: "error",
+            message: error?.message ?? "Unknown error",
+          },
+        ];
       }
 
+      // system, rate_limit_event, result, unknown — skip
       default:
-        return null;
+        return [];
     }
+  }
+
+  /** Extracts message ID from an assistant envelope, or undefined. */
+  private extractMessageId(
+    raw: Record<string, unknown>,
+  ): string | undefined {
+    if (raw.type !== "assistant") return undefined;
+    const message = raw.message as { id?: string } | undefined;
+    return message?.id;
   }
 }
 
