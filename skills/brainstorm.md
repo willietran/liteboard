@@ -40,6 +40,11 @@ Every project benefits from a design phase. Even "simple" features have edge cas
 ### 4. Write Design Doc
 - Present design in sections with **approval checkpoints**
 - Don't dump the entire design at once — get incremental buy-in
+- Include a **Quality & Testing Strategy** section covering:
+  - Which modules contain testable logic (TDD candidates)
+  - Performance considerations and algorithmic complexity
+  - Security and trust boundaries
+  - Shared abstractions that prevent duplication
 - Auto-generate a slug from the topic (kebab-case, max 30 chars)
 
 ### 5. Create Project Structure
@@ -81,6 +86,10 @@ After writing the design doc:
 > 3. **Security**: Any OWASP top-10 risks? Data handling concerns?
 > 4. **Edge cases**: What happens when things fail? Concurrency issues?
 > 5. **Clarity**: Could an engineer implement this without asking questions?
+> 6. **DRY-readiness**: Does the design avoid specifying logic in multiple places? Will implementation naturally avoid duplication?
+> 7. **Performance**: Potential O(n²) patterns, N+1 issues, unnecessary I/O?
+> 8. **TDD strategy**: Are testable components identified? Are boundaries between logic and side effects clear?
+> 9. **Code elegance**: Does the design favor clean abstractions and minimal complexity? Simpler alternatives not considered?
 >
 > Be specific. Reference sections by name. Flag blocking issues vs nice-to-haves.
 
