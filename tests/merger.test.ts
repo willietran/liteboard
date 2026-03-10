@@ -9,6 +9,7 @@ vi.mock("node:child_process", () => ({
 vi.mock("node:fs", () => ({
   unlinkSync: vi.fn(),
   existsSync: vi.fn(),
+  readFileSync: vi.fn(),
 }));
 
 import { execFileSync } from "node:child_process";
@@ -18,6 +19,7 @@ import { squashMerge, abortAndRecover } from "../src/merger.js";
 const mockExec = vi.mocked(execFileSync);
 const mockUnlink = vi.mocked(fs.unlinkSync);
 const mockExistsSync = vi.mocked(fs.existsSync);
+const mockReadFileSync = vi.mocked(fs.readFileSync);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -35,12 +37,22 @@ function npmCalls(): [string, string[]][] {
     .map((c) => [c[0] as string, c[1] as string[]]);
 }
 
+/** Returns all npx calls as [command, args] tuples. */
+function npxCalls(): [string, string[]][] {
+  return mockExec.mock.calls
+    .filter((c) => c[0] === "npx")
+    .map((c) => [c[0] as string, c[1] as string[]]);
+}
+
 // ─── Setup ───────────────────────────────────────────────────────────────────
+
+const PKG_WITH_TEST = JSON.stringify({ scripts: { test: "vitest run", build: "tsc" } });
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockExec.mockReturnValue("");
   mockExistsSync.mockReturnValue(true); // Default: package.json exists
+  mockReadFileSync.mockReturnValue(PKG_WITH_TEST); // Default: valid test script
 });
 
 // ─── squashMerge: happy path ─────────────────────────────────────────────────
@@ -108,31 +120,53 @@ describe("squashMerge — trial merge succeeds", () => {
     expect(resetIdx).toBeLessThan(commitIdx);
   });
 
-  it("runs npm install then build validation before commit", async () => {
+  it("runs full validation pipeline: install → lockfile → tsc → build → test → commit", async () => {
     await squashMerge(1, "proj", "feat/x", "chore: init", false);
 
-    // npm install and npm run build should be called
+    // All validation steps should be called
     const npms = npmCalls();
     expect(npms).toContainEqual(["npm", ["install"]]);
     expect(npms).toContainEqual(["npm", ["run", "build"]]);
+    expect(npms).toContainEqual(["npm", ["test"]]);
 
-    // Order: npm install < npm run build < git commit
+    const npxs = npxCalls();
+    expect(npxs).toContainEqual(["npx", ["tsc", "--noEmit"]]);
+
+    // Order: npm install → git add lockfile → tsc --noEmit → npm run build → npm test → git commit
     const allCalls = mockExec.mock.calls;
     const installIdx = allCalls.findIndex(
       (c) => c[0] === "npm" && (c[1] as string[])[0] === "install",
     );
+    const addLockIdx = allCalls.findIndex(
+      (c) =>
+        c[0] === "git" &&
+        (c[1] as string[])[0] === "add" &&
+        (c[1] as string[])[1] === "package-lock.json",
+    );
+    const tscIdx = allCalls.findIndex(
+      (c) => c[0] === "npx" && (c[1] as string[])[0] === "tsc",
+    );
     const buildIdx = allCalls.findIndex(
       (c) => c[0] === "npm" && (c[1] as string[])[0] === "run",
+    );
+    const testIdx = allCalls.findIndex(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "test",
     );
     const commitIdx = allCalls.findIndex(
       (c) =>
         c[0] === "git" && (c[1] as string[])[0] === "commit",
     );
     expect(installIdx).toBeGreaterThan(-1);
+    expect(addLockIdx).toBeGreaterThan(-1);
+    expect(tscIdx).toBeGreaterThan(-1);
     expect(buildIdx).toBeGreaterThan(-1);
+    expect(testIdx).toBeGreaterThan(-1);
     expect(commitIdx).toBeGreaterThan(-1);
-    expect(installIdx).toBeLessThan(buildIdx);
-    expect(buildIdx).toBeLessThan(commitIdx);
+    expect(installIdx).toBeLessThan(addLockIdx);
+    expect(addLockIdx).toBeLessThan(tscIdx);
+    expect(tscIdx).toBeLessThan(buildIdx);
+    expect(buildIdx).toBeLessThan(testIdx);
+    expect(testIdx).toBeLessThan(commitIdx);
   });
 });
 
@@ -266,16 +300,67 @@ describe("squashMerge — package.json conflict resolution", () => {
   });
 });
 
+// ─── squashMerge: type-check failure ─────────────────────────────────────────
+
+describe("squashMerge — type-check failure", () => {
+  it("aborts merge and throws when tsc --noEmit fails", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "npx" && a[0] === "tsc") {
+        throw Object.assign(new Error("type check failed"), {
+          stderr: "error TS2345: Argument of type",
+        });
+      }
+      return "";
+    });
+
+    await expect(
+      squashMerge(10, "proj", "feat/x", "feat: bad-types", false),
+    ).rejects.toThrow(/Type check.*fail/);
+
+    // Should NOT have committed
+    expect(gitCalls().find((c) => c[0] === "commit")).toBeUndefined();
+
+    // Should NOT have reached build or test
+    expect(npmCalls().find(([, a]) => a[0] === "run")).toBeUndefined();
+    expect(npmCalls().find(([, a]) => a[0] === "test")).toBeUndefined();
+  });
+});
+
+// ─── squashMerge: test suite failure ─────────────────────────────────────────
+
+describe("squashMerge — test suite failure", () => {
+  it("aborts merge and throws when npm test fails", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "npm" && a[0] === "test") {
+        throw Object.assign(new Error("tests failed"), {
+          stderr: "FAIL src/foo.test.ts",
+        });
+      }
+      return "";
+    });
+
+    await expect(
+      squashMerge(11, "proj", "feat/x", "feat: bad-tests", false),
+    ).rejects.toThrow(/Test suite.*fail/);
+
+    // Should NOT have committed
+    expect(gitCalls().find((c) => c[0] === "commit")).toBeUndefined();
+  });
+});
+
 // ─── squashMerge: no package.json (non-npm project) ─────────────────────────
 
 describe("squashMerge — no package.json", () => {
-  it("skips build validation when no package.json", async () => {
+  it("skips all validation when no package.json", async () => {
     mockExistsSync.mockReturnValue(false);
 
     await squashMerge(7, "proj", "feat/x", "chore: no-npm", false);
 
-    // No npm calls at all
+    // No npm or npx calls at all
     expect(npmCalls()).toHaveLength(0);
+    expect(npxCalls()).toHaveLength(0);
 
     // But commit still happens
     expect(gitCalls()).toContainEqual(["commit", "-m", "chore: no-npm"]);
@@ -388,5 +473,46 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
       (c) => c[0] === "checkout" && c[1] === "feat/x",
     );
     expect(checkoutFeatureCalls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ─── squashMerge: test script guard ─────────────────────────────────────────
+
+describe("squashMerge — test script guard", () => {
+  it("skips npm test when package.json has no test script", async () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({ scripts: { build: "tsc" } }));
+
+    await squashMerge(12, "proj", "feat/x", "chore: no-tests", false);
+
+    // npm test should NOT be called
+    expect(npmCalls().find(([, a]) => a[0] === "test")).toBeUndefined();
+
+    // But commit still happens
+    expect(gitCalls()).toContainEqual(["commit", "-m", "chore: no-tests"]);
+  });
+
+  it("skips npm test when test script is the npm default placeholder", async () => {
+    mockReadFileSync.mockReturnValue(
+      JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1', build: "tsc" } }),
+    );
+
+    await squashMerge(13, "proj", "feat/x", "chore: default-test", false);
+
+    // npm test should NOT be called
+    expect(npmCalls().find(([, a]) => a[0] === "test")).toBeUndefined();
+
+    // But commit still happens
+    expect(gitCalls()).toContainEqual(["commit", "-m", "chore: default-test"]);
+  });
+
+  it("runs npm test when package.json has a valid test script", async () => {
+    mockReadFileSync.mockReturnValue(
+      JSON.stringify({ scripts: { test: "vitest run", build: "tsc" } }),
+    );
+
+    await squashMerge(14, "proj", "feat/x", "feat: with-tests", false);
+
+    // npm test should be called
+    expect(npmCalls()).toContainEqual(["npm", ["test"]]);
   });
 });

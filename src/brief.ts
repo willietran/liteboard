@@ -53,6 +53,10 @@ export function buildBrief(
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
 
+  // 1.5. Quality standards
+  parts.push(readCommand("quality-standards.md"));
+  parts.push("");
+
   // 2. Task context
   parts.push(`---`);
   parts.push(
@@ -109,7 +113,9 @@ export function buildBrief(
   parts.push("");
   parts.push("### Phase 3: Implement");
   if (task.tddPhase && task.tddPhase !== "Exempt") {
-    parts.push(`This is a TDD task. Follow: ${task.tddPhase}`);
+    parts.push(`This is a TDD task (${task.tddPhase}). Write a failing test first, verify it fails (RED), then write the minimum implementation to make it pass (GREEN), then refactor. Verify the test suite after each step. Skipping RED verification or writing implementation before tests is a **BLOCKING violation**.`);
+  } else {
+    parts.push("This task is **TDD-Exempt**. Tests are encouraged but not required first.");
   }
   parts.push("");
   parts.push("### Phase 4: Code Review");
@@ -134,6 +140,7 @@ export function buildBrief(
   parts.push(
     "- Write `.memory-entry.md` as your final step before committing",
   );
+  parts.push("- Before code review, verify: `npx tsc --noEmit` && `npm run build` && `npm test` all pass");
   parts.push("");
 
   return parts.join("\n");

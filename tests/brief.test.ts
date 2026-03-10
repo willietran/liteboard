@@ -29,6 +29,7 @@ const STUB_COMMANDS: Record<string, string> = {
   "session-review.md": "# Session Review\nSpawn a review subagent for code.",
   "receiving-code-review.md": "# Receiving Code Review\nProcess feedback methodically.",
   "code-reviewer.md": "# Code Reviewer\nEvaluate code against criteria.",
+  "quality-standards.md": "# Quality Standards\nEvery task must satisfy these standards.",
 };
 
 function stubReadFileSync() {
@@ -240,6 +241,32 @@ describe("buildBrief", () => {
     const task = makeTask({ tddPhase: "Exempt" });
     const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
 
-    expect(brief).not.toContain("This is a TDD task");
+    expect(brief).toContain("TDD-Exempt");
+    expect(brief).not.toContain("BLOCKING violation");
+  });
+
+  it("includes quality standards in every brief", () => {
+    const task = makeTask();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).toContain("# Quality Standards");
+    expect(brief).toContain("Every task must satisfy these standards.");
+  });
+
+  it("includes expanded TDD discipline for TDD tasks", () => {
+    const task = makeTask({ tddPhase: "RED → GREEN" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).toContain("Write a failing test first");
+    expect(brief).toContain("BLOCKING violation");
+  });
+
+  it("includes verification commands in rules section", () => {
+    const task = makeTask();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).toContain("tsc --noEmit");
+    expect(brief).toContain("npm run build");
+    expect(brief).toContain("npm test");
   });
 });

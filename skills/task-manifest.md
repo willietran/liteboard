@@ -46,8 +46,9 @@ Each task must include:
 - Ensure topologically valid ordering (no circular deps)
 
 ### TDD Inference
-- Backend modules, services, data pipelines: default to TDD (`RED → GREEN → REFACTOR`)
-- UI components, CLI entry points, markdown files: default to Exempt
+- **Default: TDD** for any task creating or modifying files with testable logic
+- **Exempt only when**: Pure UI with no logic, config files, documentation, CLI entry points that only wire tested modules
+- **When in doubt, mark TDD** — easier to exempt later than retrofit tests
 - Override based on design doc specifications
 
 ### Complexity Scoring
@@ -72,11 +73,18 @@ Each task must include:
 9. Security checklist
 10. Session-grouping hints
 
+### Quality Contract
+- All tasks inherit quality standards (DRY, security, performance, elegance) — injected automatically via the agent brief
+- TDD tasks must follow strict RED → GREEN → REFACTOR with verification at each step
+- All tasks must pass `tsc --noEmit`, `npm run build`, `npm test` before merge
+- Review gates (plan review + code review) are mandatory and blocking
+- No need to repeat the contract per-task — it is injected automatically
+
 ## Architect Review Loop
 
 After generating the manifest:
 1. Dispatch a critic subagent via the Agent tool (max 3 rounds)
-2. Critic evaluates: completeness, security, DRY, dependency correctness, explore coverage
+2. Critic evaluates: completeness, security, DRY, dependency correctness, explore coverage, performance (algorithmic complexity, I/O patterns), code elegance (clean abstractions, minimal complexity), and TDD coverage (are the right tasks marked TDD?)
 3. Process feedback critically — push back on wrong suggestions
 4. Update manifest with accepted changes
 5. Write audit trail to `docs/liteboard/<slug>/architect-review.md`

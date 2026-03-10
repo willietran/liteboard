@@ -145,6 +145,18 @@ export async function squashMerge(
           git(["add", "package-lock.json"], { verbose });
         } catch {}
 
+        // 3b: Type check (fast fail before full build)
+        try {
+          execFileSync("npx", ["tsc", "--noEmit"], {
+            cwd: repoRoot,
+            stdio: "pipe",
+            encoding: "utf-8",
+            timeout: NPM_TIMEOUT_MS,
+          });
+        } catch (e: unknown) {
+          resetAndThrow(taskId, "Type check", e, verbose);
+        }
+
         try {
           execFileSync("npm", ["run", "build"], {
             cwd: repoRoot,
@@ -154,6 +166,28 @@ export async function squashMerge(
           });
         } catch (e: unknown) {
           resetAndThrow(taskId, "Build validation", e, verbose);
+        }
+
+        // 3d: Run tests (only if a real test script is configured)
+        let hasTestScript = false;
+        try {
+          const pkg = JSON.parse(fs.readFileSync(`${repoRoot}/package.json`, "utf-8"));
+          hasTestScript = Boolean(pkg.scripts?.test &&
+            pkg.scripts.test !== 'echo "Error: no test specified" && exit 1');
+        } catch {
+          // Malformed package.json — skip test step, don't fail the merge for this
+        }
+        if (hasTestScript) {
+          try {
+            execFileSync("npm", ["test"], {
+              cwd: repoRoot,
+              stdio: "pipe",
+              encoding: "utf-8",
+              timeout: NPM_TIMEOUT_MS,
+            });
+          } catch (e: unknown) {
+            resetAndThrow(taskId, "Test suite", e, verbose);
+          }
         }
       }
 

@@ -15,6 +15,9 @@ Spawn an independent review subagent to evaluate the implementation plan before 
    - Are verification commands sufficient to catch regressions?
    - Are there security, performance, or DRY concerns in the proposed approach?
    - Is anything missing or underspecified?
+   - Does the plan include test-first steps for TDD tasks? (write test → verify RED → implement → verify GREEN → refactor)
+   - Performance concerns in proposed approach? (algorithm complexity, I/O patterns, N+1)
+   - Clean, elegant design? (minimal abstractions, no over-engineering, idiomatic patterns)
 
 3. Receive the review. For each piece of feedback:
    - If valid: update the plan accordingly.
@@ -22,7 +25,7 @@ Spawn an independent review subagent to evaluate the implementation plan before 
 
 4. If changes were made, resubmit the updated plan to the reviewer.
 
-5. **Max 3 rounds.** If the plan has not converged after 3 rounds, note the unresolved items and proceed with the best current version.
+5. **Max 3 rounds.** If unresolved **BLOCKING** issues remain after 3 rounds, the plan review **fails** — do not proceed to implementation. NIT-level items may be noted and carried forward.
 
 ## Output
 
