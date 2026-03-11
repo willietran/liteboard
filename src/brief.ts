@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Task, ProjectType } from "./types.js";
+import type { Task } from "./types.js";
 import { readMemorySnapshot } from "./memory.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -47,6 +47,12 @@ export function buildBrief(
   featureBranch: string,
 ): string {
   const slug = path.basename(projectDir);
+
+  // QA tasks get a specialized brief
+  if (task.type === "qa") {
+    return buildQABrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, slug);
+  }
+
   const parts: string[] = [];
 
   // 1. Agent orientation
@@ -146,72 +152,88 @@ export function buildBrief(
   return parts.join("\n");
 }
 
-// ─── Gate Agent Brief ─────────────────────────────────────────────────────────
+// ─── QA Brief ─────────────────────────────────────────────────────────────────
 
-export interface GateAgentBriefOpts {
-  projectType: ProjectType;
-  port: number;
-  startCommand: { cmd: string; args: string[] };
-  skipSmoke: boolean;
-  skipQA: boolean;
-  noFixer: boolean;
-  fixerPatience: number;
-  playwrightAvailable: boolean;
-  designPath?: string;
-  manifestPath?: string;
-}
-
-export function buildGateAgentBrief(
-  tasks: Task[],
-  opts: GateAgentBriefOpts,
+function buildQABrief(
+  task: Task,
+  allTasks: Task[],
+  projectDir: string,
+  designPath: string,
+  manifestPath: string,
+  featureBranch: string,
+  slug: string,
 ): string {
   const parts: string[] = [];
 
-  // Gate agent workflow instructions
-  parts.push(readCommand("gate-agent.md"));
+  // 1. Agent orientation + quality standards (same as impl tasks)
+  parts.push(readCommand("agent-orientation.md"));
+  parts.push("");
+  parts.push(readCommand("quality-standards.md"));
   parts.push("");
 
-  // Project context
+  // 2. Task context
   parts.push("---");
-  parts.push("## Project Context");
-  parts.push(`- **Project type:** ${opts.projectType}`);
-  parts.push(`- **Port:** ${opts.port}`);
-  parts.push(`- **Start command:** \`${opts.startCommand.cmd} ${opts.startCommand.args.join(" ")}\``);
+  parts.push(`I'm the **QA agent** for **Task ${task.id}: ${task.title}** in the **${slug}** project.`);
   parts.push("");
 
-  // Skip flags
-  if (opts.skipSmoke) parts.push("**SKIP_SMOKE** is set — skip Step 2 (Smoke Test).");
-  if (opts.skipQA) parts.push("**SKIP_QA** is set — skip Step 3 (QA).");
-  if (opts.noFixer) parts.push("**NO_FIXER** is set — report failures without spawning fixer sub-agents.");
-  if (!opts.playwrightAvailable) parts.push("**Playwright MCP is not available** — skip Step 3 (QA).");
-  parts.push(`**MAX_FIX_ATTEMPTS:** ${opts.fixerPatience}`);
+  // 3. Reference docs
+  parts.push("**Reference documents** (read these first):");
+  parts.push(`- Design doc: \`${designPath}\``);
+  parts.push(`- Task manifest: \`${manifestPath}\``);
   parts.push("");
 
-  // Reference documents
-  if (opts.designPath || opts.manifestPath) {
-    parts.push("**Reference documents:**");
-    if (opts.designPath) parts.push(`- Design doc: \`${opts.designPath}\``);
-    if (opts.manifestPath) parts.push(`- Task manifest: \`${opts.manifestPath}\``);
+  // 4. Memory snapshot
+  const memory = readMemorySnapshot(projectDir);
+  if (memory && /^## T\d+/m.test(memory)) {
+    parts.push("**Build Memory** (context from completed tasks):");
+    parts.push("```");
+    parts.push(memory.trim());
+    parts.push("```");
     parts.push("");
   }
 
-  // Task manifest with requirements
-  parts.push("## Task Manifest");
-  for (const task of tasks) {
-    parts.push(`- **Task ${task.id}: ${task.title}**`);
-    if (task.creates.length > 0) {
-      parts.push(`  Creates: ${task.creates.map(f => `\`${f}\``).join(", ")}`);
-    }
-    if (task.modifies.length > 0) {
-      parts.push(`  Modifies: ${task.modifies.map(f => `\`${f}\``).join(", ")}`);
-    }
-    if (task.requirements.length > 0) {
-      parts.push("  Requirements:");
-      for (const req of task.requirements) {
-        parts.push(`    - ${req}`);
+  // 5. Dependency task details (what changed and what to validate)
+  const depTasks = task.dependsOn
+    .map(id => allTasks.find(t => t.id === id))
+    .filter((t): t is Task => t !== undefined);
+
+  if (depTasks.length > 0) {
+    parts.push("## What to Validate");
+    parts.push("");
+    for (const dep of depTasks) {
+      parts.push(`### Task ${dep.id}: ${dep.title}`);
+      if (dep.creates.length > 0) {
+        parts.push(`- Creates: ${dep.creates.map(f => `\`${f}\``).join(", ")}`);
       }
+      if (dep.modifies.length > 0) {
+        parts.push(`- Modifies: ${dep.modifies.map(f => `\`${f}\``).join(", ")}`);
+      }
+      if (dep.requirements.length > 0) {
+        parts.push("- Requirements:");
+        for (const req of dep.requirements) {
+          parts.push(`  - ${req}`);
+        }
+      }
+      parts.push("");
     }
   }
+
+  // 6. QA workflow (replaces standard plan-review/implement/code-review phases)
+  parts.push("---");
+  parts.push("## Workflow");
+  parts.push("");
+  parts.push(readCommand("qa-agent.md"));
+  parts.push("");
+
+  // 7. Rules
+  parts.push("---");
+  parts.push("## Rules");
+  parts.push(`- **Commit message** (use exactly): \`${task.commitMessage}\``);
+  parts.push(`- **Feature branch**: \`${featureBranch}\``);
+  parts.push("- Do NOT touch files unrelated to this task");
+  parts.push("- Do NOT push to remote");
+  parts.push("- If you made code fixes, write `.memory-entry.md` summarizing what you fixed before committing");
+  parts.push("- Use standard `[STAGE: ...]` markers as described in the workflow above");
   parts.push("");
 
   return parts.join("\n");

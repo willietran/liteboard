@@ -32,6 +32,7 @@ Each task must include:
   - Second requirement
     - Sub-detail
   - Third requirement
+- **Type:** QA (or omit for implementation tasks)
 - **TDD Phase:** `RED`, `GREEN`, `REFACTOR` (or Exempt)
 - **Commit:** `task N: description`
 - **Complexity Score:** N
@@ -72,6 +73,15 @@ Each task must include:
 8. TDD tasks table
 9. Security checklist
 10. Session-grouping hints
+
+### QA Task Rules
+- Add QA tasks after implementation phases for iterative validation
+- Add a final QA task that depends on all other tasks (including earlier QA tasks) for full integration validation
+- QA tasks must have `**Type:** QA`, requirements describing what to validate, and dependencies on the tasks they validate
+- QA tasks are TDD-Exempt (they validate, not implement)
+- Complexity: typically 2-3 (validation is simpler than implementation)
+- QA tasks should reference the requirements of their dependency tasks so the QA agent knows what to check
+- QA task commit messages describe the squash merge (e.g., `qa: validate integration for tasks 1-5`). Inner fixer sub-agent commits use `fix(qa): <description>` — these get squashed
 
 ### Quality Contract
 - All tasks inherit quality standards (DRY, security, performance, elegance) — injected automatically via the agent brief

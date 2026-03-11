@@ -18,7 +18,7 @@ vi.mock("../src/memory.js", () => ({
 
 import { readFileSync } from "node:fs";
 import { readMemorySnapshot } from "../src/memory.js";
-import { buildBrief, buildGateAgentBrief, type GateAgentBriefOpts } from "../src/brief.js";
+import { buildBrief } from "../src/brief.js";
 import type { Task } from "../src/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ const STUB_COMMANDS: Record<string, string> = {
   "receiving-code-review.md": "# Receiving Code Review\nProcess feedback methodically.",
   "code-reviewer.md": "# Code Reviewer\nEvaluate code against criteria.",
   "quality-standards.md": "# Quality Standards\nEvery task must satisfy these standards.",
-  "gate-agent.md": "# Integration Gate Agent\nYou are the integration gate agent.",
+  "qa-agent.md": "# QA Agent\nYou are a QA validation agent.",
 };
 
 function stubReadFileSync() {
@@ -272,89 +272,62 @@ describe("buildBrief", () => {
   });
 });
 
-// ─── buildGateAgentBrief ─────────────────────────────────────────────────────
+// ─── QA brief ────────────────────────────────────────────────────────────────
 
-describe("buildGateAgentBrief", () => {
-  const defaultOpts: GateAgentBriefOpts = {
-    projectType: "nextjs",
-    port: 12345,
-    startCommand: { cmd: "npx", args: ["next", "start", "-p", "12345"] },
-    skipSmoke: false,
-    skipQA: false,
-    noFixer: false,
-    fixerPatience: 3,
-    playwrightAvailable: true,
-    designPath: "/project/design.md",
-    manifestPath: "/project/manifest.md",
-  };
-
-  it("includes gate-agent.md content", () => {
-    const tasks = [makeTask()];
-    const brief = buildGateAgentBrief(tasks, defaultOpts);
-    expect(brief).toContain("# Integration Gate Agent");
-    expect(brief).toContain("You are the integration gate agent.");
+describe("buildBrief for QA tasks", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
   });
 
-  it("includes project type, port, and start command", () => {
-    const tasks = [makeTask()];
-    const brief = buildGateAgentBrief(tasks, defaultOpts);
-    expect(brief).toContain("nextjs");
-    expect(brief).toContain("12345");
-    expect(brief).toContain("npx next start -p 12345");
+  it("includes qa-agent.md content for type: qa", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("# QA Agent");
+    expect(brief).toContain("You are a QA validation agent.");
   });
 
-  it("includes skip flags when set", () => {
-    const tasks = [makeTask()];
-    const brief = buildGateAgentBrief(tasks, {
-      ...defaultOpts,
-      skipSmoke: true,
-      skipQA: true,
-      noFixer: true,
+  it("includes dependent task requirements", () => {
+    const depTask = makeDepTask({
+      id: 10,
+      title: "Add auth",
+      creates: ["src/auth.ts"],
+      modifies: ["src/app.ts"],
+      requirements: ["User can sign up", "User can log in"],
     });
-    expect(brief).toContain("SKIP_SMOKE");
-    expect(brief).toContain("SKIP_QA");
-    expect(brief).toContain("NO_FIXER");
-  });
+    const qaTask = makeTask({ id: 20, type: "qa", dependsOn: [10] });
+    const allTasks = [depTask, qaTask];
 
-  it("omits skip flags when not set", () => {
-    const tasks = [makeTask()];
-    const brief = buildGateAgentBrief(tasks, defaultOpts);
-    expect(brief).not.toContain("SKIP_SMOKE");
-    expect(brief).not.toContain("SKIP_QA");
-    expect(brief).not.toContain("NO_FIXER");
-  });
-
-  it("includes fixer patience", () => {
-    const tasks = [makeTask()];
-    const brief = buildGateAgentBrief(tasks, { ...defaultOpts, fixerPatience: 5 });
-    expect(brief).toContain("MAX_FIX_ATTEMPTS:** 5");
-  });
-
-  it("includes Playwright unavailable note when not available", () => {
-    const tasks = [makeTask()];
-    const brief = buildGateAgentBrief(tasks, { ...defaultOpts, playwrightAvailable: false });
-    expect(brief).toContain("Playwright MCP is not available");
-  });
-
-  it("includes reference documents", () => {
-    const tasks = [makeTask()];
-    const brief = buildGateAgentBrief(tasks, defaultOpts);
-    expect(brief).toContain("/project/design.md");
-    expect(brief).toContain("/project/manifest.md");
-  });
-
-  it("includes task manifest with requirements", () => {
-    const tasks = [makeTask({ id: 1, title: "Add login", requirements: ["User can sign up", "User can log in"] })];
-    const brief = buildGateAgentBrief(tasks, defaultOpts);
-    expect(brief).toContain("Task 1: Add login");
+    const brief = buildBrief(qaTask, allTasks, "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("Task 10: Add auth");
     expect(brief).toContain("User can sign up");
     expect(brief).toContain("User can log in");
-  });
-
-  it("includes task creates and modifies", () => {
-    const tasks = [makeTask({ creates: ["src/auth.ts"], modifies: ["src/app.ts"] })];
-    const brief = buildGateAgentBrief(tasks, defaultOpts);
     expect(brief).toContain("`src/auth.ts`");
     expect(brief).toContain("`src/app.ts`");
+  });
+
+  it("does NOT include plan-review or session-review workflow phases", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).not.toContain("# Plan Review");
+    expect(brief).not.toContain("# Session Review");
+    expect(brief).not.toContain("Phase 1-2");
+    expect(brief).not.toContain("Phase 3: Implement");
+    expect(brief).not.toContain("Phase 4: Code Review");
+  });
+
+  it("includes agent-orientation and quality-standards", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("# Agent Orientation");
+    expect(brief).toContain("# Quality Standards");
+  });
+
+  it("identifies itself as QA agent in task context", () => {
+    const task = makeTask({ id: 5, title: "Validate integration", type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("QA agent");
+    expect(brief).toContain("Task 5: Validate integration");
   });
 });

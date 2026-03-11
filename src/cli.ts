@@ -20,7 +20,7 @@ import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
 import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
 import { buildBrief } from "./brief.js";
-import { runIntegrationGate, gateCleanupProcesses } from "./validator.js";
+import { git } from "./git.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -49,11 +49,6 @@ Options:
   --tasks=<1,2,3>         Run specific task IDs only
   --dry-run               Parse and show dependency graph only
   --verbose               Log all git commands to stderr
-  --skip-validation       Skip integration gate entirely
-  --skip-smoke            Skip smoke test phase
-  --skip-qa               Skip Playwright QA phase
-  --no-fixer              Report failures without auto-fix
-  --fixer-patience=<N>    Override fixer patience (default: 3)
   --no-tui                Disable TUI dashboard (line-based output)`);
     process.exit(0);
   }
@@ -66,11 +61,6 @@ Options:
   let taskFilter: number[] | null = null;
   let dryRun = false;
   let verbose = false;
-  let skipValidation = false;
-  let skipSmoke = false;
-  let skipQA = false;
-  let noFixer = false;
-  let fixerPatience = 3;
   let noTui = false;
 
   for (const arg of args) {
@@ -87,16 +77,6 @@ Options:
       dryRun = true;
     } else if (arg === "--verbose") {
       verbose = true;
-    } else if (arg === "--skip-validation") {
-      skipValidation = true;
-    } else if (arg === "--skip-smoke") {
-      skipSmoke = true;
-    } else if (arg === "--skip-qa") {
-      skipQA = true;
-    } else if (arg === "--no-fixer") {
-      noFixer = true;
-    } else if (arg.startsWith("--fixer-patience=")) {
-      fixerPatience = Math.max(1, parseInt(arg.slice("--fixer-patience=".length), 10));
     } else if (arg === "--no-tui") {
       noTui = true;
     } else if (!arg.startsWith("--")) {
@@ -121,7 +101,7 @@ Options:
     branch = `liteboard/${slug}`;
   }
 
-  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose, skipValidation, skipSmoke, skipQA, noFixer, fixerPatience, noTui };
+  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose, noTui };
 }
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
@@ -314,13 +294,6 @@ async function main(): Promise<void> {
       }
     }
 
-    // Kill integration gate processes
-    for (const proc of gateCleanupProcesses) {
-      try {
-        proc.kill("SIGTERM");
-      } catch {}
-    }
-
     setTimeout(() => {
       clearInterval(dashboardInterval);
       if (isTTY()) process.stdout.write(SHOW_CURSOR);
@@ -366,18 +339,37 @@ async function main(): Promise<void> {
               memBody = fs.readFileSync(memEntryPath, "utf-8");
             }
 
-            // Squash merge
-            task.stage = "Merging";
-            await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
-
-            // Append memory AFTER successful merge
-            if (memBody) {
-              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+            // Check if task produced any changes to merge
+            let hasDiff = true;
+            try {
+              git(["diff", "--quiet", args.branch, `${args.branch}-t${task.id}`], { verbose: args.verbose });
+              hasDiff = false; // exit 0 = no diff
+            } catch {
+              // exit 1 = has diff (expected for implementation tasks)
             }
 
-            task.status = "done";
-            task.stage = "";
-            task.completedAt = new Date().toISOString();
+            if (!hasDiff) {
+              // No changes to merge (QA passed clean, or edge case)
+              if (memBody) {
+                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+              }
+              task.status = "done";
+              task.stage = "";
+              task.completedAt = new Date().toISOString();
+            } else {
+              // Normal merge path
+              task.stage = "Merging";
+              await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
+
+              // Append memory AFTER successful merge
+              if (memBody) {
+                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+              }
+
+              task.status = "done";
+              task.stage = "";
+              task.completedAt = new Date().toISOString();
+            }
           } catch (e: unknown) {
             task.status = "failed";
             task.stage = "";
@@ -461,60 +453,18 @@ async function main(): Promise<void> {
   const done = filteredTasks.filter(t => t.status === "done").length;
   const failed = filteredTasks.filter(t => t.status === "failed").length;
 
+  if (isTTY()) process.stdout.write(SHOW_CURSOR);
+  console.log("");
+  console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
+
   if (failed > 0) {
-    // No gate — show cursor and print failure summary
-    if (isTTY()) process.stdout.write(SHOW_CURSOR);
-    console.log("");
-    console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
     console.log(`  \x1b[32m${done} done\x1b[0m, \x1b[31m${failed} failed\x1b[0m of ${filteredTasks.length} tasks`);
     console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
     process.exit(1);
   }
 
-  // Integration gate: only run if ALL tasks succeeded
-  if (done === filteredTasks.length && !args.skipValidation) {
-    if (!isTTY()) {
-      console.log(`\n${done} tasks merged. Starting integration gate...\n`);
-    }
-    // Cursor stays hidden — gate dashboard takes over the screen
-    const gateResult = await runIntegrationGate(process.cwd(), filteredTasks, {
-      branch: args.branch,
-      provider,
-      model: args.model,
-      skipSmoke: args.skipSmoke,
-      skipQA: args.skipQA,
-      noFixer: args.noFixer,
-      fixerPatience: args.fixerPatience,
-      verbose: args.verbose,
-      projectDir: args.projectPath,
-      designPath,
-      manifestPath,
-    });
-
-    // Gate dashboard done — cursor restored by gate, print final summary
-    console.log("");
-    console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
-    console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
-
-    if (gateResult.finalSuccess) {
-      console.log(`  \x1b[32mIntegration gate passed.\x1b[0m`);
-      console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
-    } else {
-      console.log(`  \x1b[31mIntegration gate failed.\x1b[0m`);
-      if (gateResult.failReason) {
-        console.log(`  Reason: ${gateResult.failReason}`);
-      }
-      console.log(`  Check logs at ${args.projectPath}/logs/ for details.`);
-      process.exit(2);
-    }
-  } else {
-    // No gate — show cursor and print summary
-    if (isTTY()) process.stdout.write(SHOW_CURSOR);
-    console.log("");
-    console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
-    console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
-    console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
-  }
+  console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
+  console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
 
   process.exit(0);
 }

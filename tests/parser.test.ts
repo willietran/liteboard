@@ -437,6 +437,58 @@ describe("parseManifest", () => {
     });
   });
 
+  // ── Type field parsing ────────────────────────────────────────────────
+
+  describe("parses Type field", () => {
+    it("parses Type: QA as type: 'qa'", () => {
+      const manifest = `
+### Task 1: Validate all
+
+**Type:** QA
+**Depends on:** (none)
+**Complexity Score:** 2
+`.trimStart();
+      const manifestPath = writeTmpManifest("type-qa.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].type).toBe("qa");
+    });
+
+    it("parses Type: qa (lowercase) as type: 'qa'", () => {
+      const manifest = `
+### Task 1: Validate all
+
+**Type:** qa
+**Complexity Score:** 2
+`.trimStart();
+      const manifestPath = writeTmpManifest("type-qa-lower.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].type).toBe("qa");
+    });
+
+    it("returns type: undefined when Type field is missing", () => {
+      const manifest = `
+### Task 1: Normal task
+
+**Complexity Score:** 2
+`.trimStart();
+      const manifestPath = writeTmpManifest("type-missing.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].type).toBeUndefined();
+    });
+
+    it("returns type: undefined for Type: implementation", () => {
+      const manifest = `
+### Task 1: Impl task
+
+**Type:** implementation
+**Complexity Score:** 2
+`.trimStart();
+      const manifestPath = writeTmpManifest("type-impl.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].type).toBeUndefined();
+    });
+  });
+
   // ── Runtime defaults ──────────────────────────────────────────────────
 
   describe("sets runtime defaults for non-manifest fields", () => {
@@ -498,6 +550,22 @@ describe("parseManifest", () => {
     it("passes validation for a well-formed manifest", () => {
       const manifestPath = writeTmpManifest("valid.md", SAMPLE_MANIFEST);
       expect(() => parseManifest(manifestPath)).not.toThrow();
+    });
+
+    it("warns to stderr for unrecognized Type but does not throw", () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const manifest = `
+### Task 1: Custom type
+
+**Type:** weird
+**Complexity Score:** 1
+`.trimStart();
+      const manifestPath = writeTmpManifest("type-warn.md", manifest);
+      expect(() => parseManifest(manifestPath)).not.toThrow();
+      expect(spy).toHaveBeenCalledWith(
+        expect.stringContaining('unrecognized Type "weird"'),
+      );
+      spy.mockRestore();
     });
 
     it("warns to stderr for out-of-range complexity but does not throw", () => {

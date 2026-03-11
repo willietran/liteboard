@@ -19,12 +19,17 @@ export type TaskStage =
   | "Implementing"
   | "Code Review"
   | "Committing"
-  | "Merging";
+  | "Merging"
+  | "Validating"
+  | "Smoke Testing"
+  | "QA Testing"
+  | "Fixing";
 
 // "Merging" is intentionally excluded — it is set by cli.ts, not parsed from agent output.
 export const VALID_STAGE_MARKERS: ReadonlySet<string> = new Set([
   "Exploring", "Planning", "Plan Review", "Implementing",
   "Code Review", "Committing",
+  "Validating", "Smoke Testing", "QA Testing", "Fixing",
 ]);
 
 // ─── TDD Phase ──────────────────────────────────────────────────────────
@@ -36,6 +41,7 @@ export type TddPhase = "RED" | "GREEN" | "RED \u2192 GREEN" | "RED \u2192 GREEN 
 export interface Task {
   id: number;
   title: string;
+  type?: "qa";
   creates: string[];
   modifies: string[];
   dependsOn: number[];
@@ -110,17 +116,8 @@ export interface CLIArgs {
   taskFilter: number[] | null;
   dryRun: boolean;
   verbose: boolean;
-  skipValidation: boolean;
-  skipSmoke: boolean;
-  skipQA: boolean;
-  noFixer: boolean;
-  fixerPatience: number;
   noTui: boolean;
 }
-
-// ─── Project Type ────────────────────────────────────────────────────────
-
-export type ProjectType = "nextjs" | "vite" | "express" | "cli" | "library" | "generic";
 
 // ─── Build Validation ────────────────────────────────────────────────────
 
@@ -134,34 +131,6 @@ export interface BuildValidationResult {
   tscErrorCount: number;
   testFailCount: number;
   testPassCount: number;
-}
-
-// ─── Integration Gate ────────────────────────────────────────────────────
-
-export interface IntegrationGateResult {
-  finalSuccess: boolean;
-  failReason?: string;
-}
-
-// ─── Gate Dashboard ─────────────────────────────────────────────────────
-
-export type GatePhaseStatus = "pending" | "running" | "passed" | "failed" | "fixed" | "skipped";
-
-export interface GatePhaseEntry {
-  name: string;
-  status: GatePhaseStatus;
-}
-
-export interface GateStatus {
-  startedAt: number;
-  phases: GatePhaseEntry[];
-  currentTool: string;
-  turnCount: number;
-  bytesReceived: number;
-  fixAttempts: number;
-  maxFixAttempts: number;
-  taskCount: number;
-  logPath: string;
 }
 
 // ─── Dependency Layer ─────────────────────────────────────────────────────

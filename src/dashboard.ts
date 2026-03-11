@@ -1,4 +1,4 @@
-import type { Task, GateStatus, GatePhaseStatus } from "./types.js";
+import type { Task } from "./types.js";
 
 export const HIDE_CURSOR = "\x1b[?25l";
 export const SHOW_CURSOR = "\x1b[?25h";
@@ -135,69 +135,3 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   }
 }
 
-// ─── Gate Dashboard ──────────────────────────────────────────────────────────
-
-function formatElapsedMs(startMs: number): string {
-  return formatSeconds(Math.floor((Date.now() - startMs) / 1000));
-}
-
-const PHASE_ICONS: Record<GatePhaseStatus, { symbol: string; color: string }> = {
-  pending:  { symbol: " ", color: DIM },
-  running:  { symbol: ">", color: CYAN },
-  passed:   { symbol: "+", color: GREEN },
-  failed:   { symbol: "!", color: RED },
-  fixed:    { symbol: "~", color: YELLOW },
-  skipped:  { symbol: "-", color: GRAY },
-};
-
-const PHASE_LABELS: Record<GatePhaseStatus, string> = {
-  pending: "",
-  running: "",
-  passed: "passed",
-  failed: "FAILED",
-  fixed: "fixed",
-  skipped: "skipped",
-};
-
-export function renderGateStatus(status: GateStatus): void {
-  const lines: string[] = [];
-  const elapsed = formatElapsedMs(status.startedAt);
-
-  // Header: compact — task count + gate title + elapsed on one line
-  lines.push(`${GREEN}${status.taskCount} tasks merged${RESET}  ${BOLD}Integration Gate${RESET}  ${GRAY}${elapsed}${RESET}`);
-
-  // Phase checklist
-  for (const phase of status.phases) {
-    const icon = PHASE_ICONS[phase.status];
-    const label = PHASE_LABELS[phase.status];
-    const labelStr = label ? `  ${icon.color}${label}${RESET}` : "";
-    lines.push(`  ${icon.color}[${icon.symbol}]${RESET} ${phase.name}${labelStr}`);
-  }
-
-  // Current activity + stats on one line
-  const kb = (status.bytesReceived / 1024).toFixed(0);
-  const turnLabel = status.turnCount === 1 ? "turn" : "turns";
-  const fixStr = status.maxFixAttempts > 0
-    ? `  ${status.fixAttempts > 0 ? YELLOW : DIM}fix ${status.fixAttempts}/${status.maxFixAttempts}${RESET}`
-    : "";
-  if (status.currentTool) {
-    lines.push(`  ${GRAY}> ${status.currentTool}${RESET}  ${DIM}${status.turnCount} ${turnLabel} | ${kb}KB${fixStr}${RESET}`);
-  } else {
-    lines.push(`  ${DIM}Starting...${RESET}`);
-  }
-
-  // Log path
-  lines.push(`${DIM}Logs: ${status.logPath}${RESET}`);
-
-  if (isTTY()) {
-    const output = CURSOR_HOME
-      + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
-      + "\n"
-      + CLEAR_BELOW;
-    process.stdout.write(output);
-  } else {
-    for (const line of lines) {
-      console.log(line);
-    }
-  }
-}
