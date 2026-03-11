@@ -7,6 +7,14 @@ export const CLEAR_SCREEN = "\x1b[2J";
 const CURSOR_HOME = "\x1b[H";
 const CLEAR_TO_EOL = "\x1b[K";
 const CLEAR_BELOW = "\x1b[J";
+
+export function isTTY(): boolean {
+  return !!process.stdout.isTTY;
+}
+
+let lastPipeRenderTime = 0;
+let lastGatePipeRenderTime = 0;
+const PIPE_RENDER_INTERVAL_MS = 5000;
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
@@ -103,12 +111,21 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
     `${DIM}Logs: ${projectDir}/logs/t<N>.jsonl  (tail -f to watch)${RESET}`,
   );
 
-  // Render: content first, then clear-to-EOL — matches docs/run.ts pattern
-  const output = CURSOR_HOME
-    + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
-    + "\n"
-    + CLEAR_BELOW;
-  process.stdout.write(output);
+  if (isTTY()) {
+    const output = CURSOR_HOME
+      + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
+      + "\n"
+      + CLEAR_BELOW;
+    process.stdout.write(output);
+  } else {
+    const now = Date.now();
+    if (now - lastPipeRenderTime >= PIPE_RENDER_INTERVAL_MS) {
+      lastPipeRenderTime = now;
+      for (const line of lines) {
+        console.log(line);
+      }
+    }
+  }
 }
 
 // ─── Gate Dashboard ──────────────────────────────────────────────────────────
@@ -165,9 +182,19 @@ export function renderGateStatus(status: GateStatus): void {
   // Log path
   lines.push(`${DIM}Logs: ${status.logPath}${RESET}`);
 
-  const output = CURSOR_HOME
-    + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
-    + "\n"
-    + CLEAR_BELOW;
-  process.stdout.write(output);
+  if (isTTY()) {
+    const output = CURSOR_HOME
+      + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
+      + "\n"
+      + CLEAR_BELOW;
+    process.stdout.write(output);
+  } else {
+    const now = Date.now();
+    if (now - lastGatePipeRenderTime >= PIPE_RENDER_INTERVAL_MS) {
+      lastGatePipeRenderTime = now;
+      for (const line of lines) {
+        console.log(line);
+      }
+    }
+  }
 }

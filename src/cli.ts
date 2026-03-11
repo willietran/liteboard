@@ -18,7 +18,7 @@ import {
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
-import { renderStatus, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
+import { renderStatus, isTTY, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
 import { buildBrief } from "./brief.js";
 import { runIntegrationGate, gateCleanupProcesses } from "./validator.js";
 
@@ -291,7 +291,7 @@ async function main(): Promise<void> {
   let shuttingDown = false;
 
   // Dashboard interval
-  process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
+  if (isTTY()) process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
   const dashboardInterval = setInterval(() => {
     renderStatus(filteredTasks, args.projectPath);
   }, 1000);
@@ -317,7 +317,7 @@ async function main(): Promise<void> {
 
     setTimeout(() => {
       clearInterval(dashboardInterval);
-      process.stdout.write(SHOW_CURSOR);
+      if (isTTY()) process.stdout.write(SHOW_CURSOR);
       cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose);
       writeProgress(filteredTasks, args.projectPath);
       process.exit(1);
@@ -457,7 +457,7 @@ async function main(): Promise<void> {
 
   if (failed > 0) {
     // No gate — show cursor and print failure summary
-    process.stdout.write(SHOW_CURSOR);
+    if (isTTY()) process.stdout.write(SHOW_CURSOR);
     console.log("");
     console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
     console.log(`  \x1b[32m${done} done\x1b[0m, \x1b[31m${failed} failed\x1b[0m of ${filteredTasks.length} tasks`);
@@ -500,7 +500,7 @@ async function main(): Promise<void> {
     }
   } else {
     // No gate — show cursor and print summary
-    process.stdout.write(SHOW_CURSOR);
+    if (isTTY()) process.stdout.write(SHOW_CURSOR);
     console.log("");
     console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
     console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
@@ -511,7 +511,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(e => {
-  process.stdout.write(SHOW_CURSOR);
+  if (isTTY()) process.stdout.write(SHOW_CURSOR);
   console.error(e);
   process.exit(1);
 });

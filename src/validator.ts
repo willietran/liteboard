@@ -11,7 +11,7 @@ import type {
   GatePhaseEntry,
 } from "./types.js";
 import { buildGateAgentBrief, type GateAgentBriefOpts } from "./brief.js";
-import { renderGateStatus, HIDE_CURSOR, CLEAR_SCREEN, SHOW_CURSOR } from "./dashboard.js";
+import { renderGateStatus, isTTY, HIDE_CURSOR, CLEAR_SCREEN, SHOW_CURSOR } from "./dashboard.js";
 
 // ─── Cleanup Set ─────────────────────────────────────────────────────────────
 
@@ -310,7 +310,7 @@ export async function runIntegrationGate(
   };
 
   // Take over screen for gate dashboard (HIDE_CURSOR for defense-in-depth)
-  process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
+  if (isTTY()) process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
   renderGateStatus(status);
   const renderInterval = setInterval(() => renderGateStatus(status), 1000);
 
@@ -380,6 +380,6 @@ export async function runIntegrationGate(
     return result;
   } finally {
     clearInterval(renderInterval);
-    process.stdout.write(CLEAR_SCREEN + SHOW_CURSOR);
+    if (isTTY()) process.stdout.write(CLEAR_SCREEN + SHOW_CURSOR);
   }
 }
