@@ -3,10 +3,7 @@ import * as fs from "node:fs";
 import { git } from "./git.js";
 import { createMutex } from "./mutex.js";
 import { getErrorMessage, getErrorStderr } from "./errors.js";
-
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-const NPM_TIMEOUT_MS = 120_000;
+import { runBuildValidation, NPM_TIMEOUT_MS } from "./build-validation.js";
 
 // ─── Merge serialization lock ────────────────────────────────────────────────
 
@@ -126,69 +123,24 @@ export async function squashMerge(
       } catch {}
 
       // Step 3: Validate — install deps (if needed) and run build
-      // Skip validation entirely for non-npm projects (no package.json)
-      const hasPkgJson = fs.existsSync(`${repoRoot}/package.json`);
-      if (hasPkgJson) {
-        try {
-          execFileSync("npm", ["install"], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
-            timeout: NPM_TIMEOUT_MS,
-          });
-        } catch (e: unknown) {
-          resetAndThrow(taskId, "Dependency installation", e, verbose);
-        }
+      const buildResult = runBuildValidation(repoRoot, { cleanInstall: false, timeout: NPM_TIMEOUT_MS });
 
-        // Stage lockfile in case npm install updated it
+      // Stage lockfile in case npm install updated it
+      if (fs.existsSync(`${repoRoot}/package.json`)) {
         try {
           git(["add", "package-lock.json"], { verbose });
         } catch {}
+      }
 
-        // 3b: Type check (fast fail before full build)
-        try {
-          execFileSync("npx", ["tsc", "--noEmit"], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
-            timeout: NPM_TIMEOUT_MS,
-          });
-        } catch (e: unknown) {
-          resetAndThrow(taskId, "Type check", e, verbose);
-        }
-
-        try {
-          execFileSync("npm", ["run", "build"], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
-            timeout: NPM_TIMEOUT_MS,
-          });
-        } catch (e: unknown) {
-          resetAndThrow(taskId, "Build validation", e, verbose);
-        }
-
-        // 3d: Run tests (only if a real test script is configured)
-        let hasTestScript = false;
-        try {
-          const pkg = JSON.parse(fs.readFileSync(`${repoRoot}/package.json`, "utf-8"));
-          hasTestScript = Boolean(pkg.scripts?.test &&
-            pkg.scripts.test !== 'echo "Error: no test specified" && exit 1');
-        } catch {
-          // Malformed package.json — skip test step, don't fail the merge for this
-        }
-        if (hasTestScript) {
-          try {
-            execFileSync("npm", ["test"], {
-              cwd: repoRoot,
-              stdio: "pipe",
-              encoding: "utf-8",
-              timeout: NPM_TIMEOUT_MS,
-            });
-          } catch (e: unknown) {
-            resetAndThrow(taskId, "Test suite", e, verbose);
-          }
-        }
+      if (!buildResult.success) {
+        const phaseLabels: Record<string, string> = {
+          install: "Dependency installation",
+          typecheck: "Type check",
+          build: "Build validation",
+          test: "Test suite",
+        };
+        const label = phaseLabels[buildResult.failedPhase] || buildResult.failedPhase;
+        resetAndThrow(taskId, label, new Error(buildResult.stderr || buildResult.error || "unknown error"), verbose);
       }
 
       // Step 4: Commit

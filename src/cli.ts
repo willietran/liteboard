@@ -20,6 +20,7 @@ import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
 import { renderStatus, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
 import { buildBrief } from "./brief.js";
+import { runIntegrationGate, gateCleanupProcesses } from "./validator.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -47,7 +48,12 @@ Options:
   --branch=<name>         Feature branch name
   --tasks=<1,2,3>         Run specific task IDs only
   --dry-run               Parse and show dependency graph only
-  --verbose               Log all git commands to stderr`);
+  --verbose               Log all git commands to stderr
+  --skip-validation       Skip integration gate entirely
+  --skip-smoke            Skip smoke test phase
+  --skip-qa               Skip Playwright QA phase
+  --no-fixer              Report failures without auto-fix
+  --fixer-patience=<N>    Override fixer patience (default: 3)`);
     process.exit(0);
   }
 
@@ -59,6 +65,11 @@ Options:
   let taskFilter: number[] | null = null;
   let dryRun = false;
   let verbose = false;
+  let skipValidation = false;
+  let skipSmoke = false;
+  let skipQA = false;
+  let noFixer = false;
+  let fixerPatience = 3;
 
   for (const arg of args) {
     if (arg === "run") continue;
@@ -74,6 +85,16 @@ Options:
       dryRun = true;
     } else if (arg === "--verbose") {
       verbose = true;
+    } else if (arg === "--skip-validation") {
+      skipValidation = true;
+    } else if (arg === "--skip-smoke") {
+      skipSmoke = true;
+    } else if (arg === "--skip-qa") {
+      skipQA = true;
+    } else if (arg === "--no-fixer") {
+      noFixer = true;
+    } else if (arg.startsWith("--fixer-patience=")) {
+      fixerPatience = Math.max(1, parseInt(arg.slice("--fixer-patience=".length), 10));
     } else if (!arg.startsWith("--")) {
       positional.push(arg);
     }
@@ -96,7 +117,7 @@ Options:
     branch = `liteboard/${slug}`;
   }
 
-  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose };
+  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose, skipValidation, skipSmoke, skipQA, noFixer, fixerPatience };
 }
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
@@ -287,6 +308,13 @@ async function main(): Promise<void> {
       }
     }
 
+    // Kill integration gate processes
+    for (const proc of gateCleanupProcesses) {
+      try {
+        proc.kill("SIGTERM");
+      } catch {}
+    }
+
     setTimeout(() => {
       clearInterval(dashboardInterval);
       process.stdout.write(SHOW_CURSOR);
@@ -421,6 +449,7 @@ async function main(): Promise<void> {
     await Promise.allSettled(activePromises.values());
   }
 
+  // Stop dashboard before integration gate (gate can take 10+ minutes)
   clearInterval(dashboardInterval);
   process.stdout.write(SHOW_CURSOR);
 
@@ -432,13 +461,40 @@ async function main(): Promise<void> {
   console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
   console.log(`  \x1b[32m${done} done\x1b[0m${failed > 0 ? `, \x1b[31m${failed} failed\x1b[0m` : ""} of ${filteredTasks.length} tasks`);
 
-  if (failed === 0 && done === filteredTasks.length) {
-    console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
-  } else if (failed > 0) {
+  if (failed > 0) {
     console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
+    process.exit(1);
   }
 
-  process.exit(failed > 0 ? 1 : 0);
+  // Integration gate: only run if ALL tasks succeeded
+  if (done === filteredTasks.length && !args.skipValidation) {
+    const gateResult = await runIntegrationGate(process.cwd(), filteredTasks, {
+      branch: args.branch,
+      provider,
+      model: args.model,
+      skipSmoke: args.skipSmoke,
+      skipQA: args.skipQA,
+      noFixer: args.noFixer,
+      fixerPatience: args.fixerPatience,
+      verbose: args.verbose,
+      projectDir: args.projectPath,
+      designPath,
+      manifestPath,
+    });
+
+    if (gateResult.finalSuccess) {
+      console.log(`\n  \x1b[32mIntegration gate passed.\x1b[0m`);
+      console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
+    } else {
+      console.log(`\n  \x1b[31mIntegration gate failed.\x1b[0m`);
+      console.log(`  Check logs at ${args.projectPath}/logs/ for details.`);
+      process.exit(2);
+    }
+  } else if (done === filteredTasks.length) {
+    console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
+  }
+
+  process.exit(0);
 }
 
 main().catch(e => {

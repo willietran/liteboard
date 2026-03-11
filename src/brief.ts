@@ -7,7 +7,7 @@ import { readMemorySnapshot } from "./memory.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const commandsDir = path.resolve(__dirname, "..", "commands");
 
-function readCommand(filename: string): string {
+export function readCommand(filename: string): string {
   const filePath = path.join(commandsDir, filename);
   try {
     return fs.readFileSync(filePath, "utf-8");
@@ -141,6 +141,80 @@ export function buildBrief(
     "- Write `.memory-entry.md` as your final step before committing",
   );
   parts.push("- Before code review, verify: `npx tsc --noEmit` && `npm run build` && `npm test` all pass");
+  parts.push("");
+
+  return parts.join("\n");
+}
+
+// ─── Fixer Brief ─────────────────────────────────────────────────────────────
+
+export function buildFixerBrief(
+  errors: string,
+  diff: string,
+  tasks: Task[],
+  projectDir: string,
+  designPath?: string,
+  manifestPath?: string,
+  featureBranch?: string,
+): string {
+  const parts: string[] = [];
+
+  // Fixer agent instructions
+  parts.push(readCommand("fixer-agent.md"));
+  parts.push("");
+
+  // Error context
+  parts.push("---");
+  parts.push("## Errors to Fix");
+  parts.push("```");
+  parts.push(errors.trim());
+  parts.push("```");
+  parts.push("");
+
+  // Reference documents
+  if (designPath || manifestPath) {
+    parts.push("**Reference documents:**");
+    if (designPath) parts.push(`- Design doc: \`${designPath}\``);
+    if (manifestPath) parts.push(`- Task manifest: \`${manifestPath}\``);
+    parts.push("");
+  }
+
+  // Task summary
+  parts.push("## Task Manifest Summary");
+  for (const task of tasks) {
+    parts.push(`- **Task ${task.id}: ${task.title}**`);
+    if (task.creates.length > 0) {
+      parts.push(`  Creates: ${task.creates.map(f => `\`${f}\``).join(", ")}`);
+    }
+    if (task.modifies.length > 0) {
+      parts.push(`  Modifies: ${task.modifies.map(f => `\`${f}\``).join(", ")}`);
+    }
+  }
+  parts.push("");
+
+  // Diff context (truncated if massive)
+  if (diff) {
+    const maxDiffLines = 500;
+    const diffLines = diff.split("\n");
+    parts.push("## Current Diff (main...HEAD)");
+    parts.push("```diff");
+    if (diffLines.length > maxDiffLines) {
+      parts.push(diffLines.slice(0, maxDiffLines).join("\n"));
+      parts.push(`... (truncated, ${diffLines.length - maxDiffLines} more lines)`);
+    } else {
+      parts.push(diff.trim());
+    }
+    parts.push("```");
+    parts.push("");
+  }
+
+  // Rules
+  parts.push("---");
+  parts.push("## Rules");
+  if (featureBranch) parts.push(`- **Feature branch**: \`${featureBranch}\``);
+  parts.push("- Commit each fix with: `fix(integration): <description>`");
+  parts.push("- Do NOT push to remote");
+  parts.push("- Do NOT modify test expectations — fix the implementation");
   parts.push("");
 
   return parts.join("\n");

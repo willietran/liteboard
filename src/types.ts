@@ -110,6 +110,74 @@ export interface CLIArgs {
   taskFilter: number[] | null;
   dryRun: boolean;
   verbose: boolean;
+  skipValidation: boolean;
+  skipSmoke: boolean;
+  skipQA: boolean;
+  noFixer: boolean;
+  fixerPatience: number;
+}
+
+// ─── Project Type ────────────────────────────────────────────────────────
+
+export type ProjectType = "nextjs" | "vite" | "express" | "cli" | "library" | "generic";
+
+// ─── Build Validation ────────────────────────────────────────────────────
+
+export interface BuildValidationResult {
+  success: boolean;
+  failedPhase: "install" | "typecheck" | "build" | "test" | "none";
+  error?: string;
+  stderr?: string;
+  tscErrorCount: number;
+  testFailCount: number;
+  testPassCount: number;
+}
+
+// ─── Smoke Test ──────────────────────────────────────────────────────────
+
+export interface SmokeTestResult {
+  success: boolean;
+  projectType: ProjectType;
+  error?: string;
+  appUrl?: string;
+}
+
+// ─── Validation Metrics ──────────────────────────────────────────────────
+
+export interface ValidationMetrics {
+  tscErrorCount: number;
+  testFailCount: number;
+  buildPasses: boolean;
+  smokeTestPasses: boolean;
+  qaFailures: number;
+}
+
+// ─── QA Report ───────────────────────────────────────────────────────────
+
+export interface QAReport {
+  features: Array<{ name: string; passed: boolean; error?: string }>;
+  totalPassed: number;
+  totalFailed: number;
+}
+
+// ─── Integration Gate ────────────────────────────────────────────────────
+
+export interface IntegrationGateResult {
+  finalSuccess: boolean;
+  buildResult: BuildValidationResult;
+  smokeResult?: SmokeTestResult;
+  qaReport?: QAReport;
+  fixerResult?: FixerResult;
+  phases: string[];
+}
+
+// ─── Fixer ───────────────────────────────────────────────────────────────
+
+export interface FixerResult {
+  rounds: number;
+  converged: boolean;
+  finalMetrics: ValidationMetrics;
+  error?: string;
 }
 
 // ─── Dependency Layer ─────────────────────────────────────────────────────
