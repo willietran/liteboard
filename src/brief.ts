@@ -233,6 +233,7 @@ function buildQABrief(
   parts.push("- Do NOT touch files unrelated to this task");
   parts.push("- Do NOT push to remote");
   parts.push("- If you made code fixes, write `.memory-entry.md` summarizing what you fixed before committing");
+  parts.push("- **Always** write `.qa-report.md` in the current working directory with a markdown table of all tests and results");
   parts.push("- Use standard `[STAGE: ...]` markers as described in the workflow above");
   parts.push("");
 

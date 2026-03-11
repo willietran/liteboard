@@ -65,6 +65,21 @@ When you encounter code failures:
 
 ## Completion
 
+Before exiting, **always** write `.qa-report.md` in the current working directory (worktree root) with a summary:
+
+```markdown
+## QA Report
+
+<1-2 sentence summary: tests run, pass count, whether fixes were needed>
+
+| # | Test | Result |
+|---|------|--------|
+| 1 | <what was tested> | PASS or FAIL |
+```
+
+Include every check: build steps (tsc, build, test), smoke test, each Playwright test, fix outcomes.
+Write the report even on failure (with FAIL entries) before exiting with code 1.
+
 When all steps pass, exit cleanly (code 0). If you cannot fix issues after 3 attempts, exit with code 1.
 
 Do not output any special pass/fail markers — your exit code is what matters.

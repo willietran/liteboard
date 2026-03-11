@@ -160,6 +160,7 @@ function ensureGitignores(projectDir: string): void {
     const additions: string[] = [];
     if (!content.includes(".brief-t")) additions.push(".brief-t*.md");
     if (!content.includes(".memory-entry")) additions.push(".memory-entry.md");
+    if (!content.includes(".qa-report")) additions.push(".qa-report.md");
     if (additions.length > 0) {
       fs.appendFileSync(repoGitignore, "\n" + additions.join("\n") + "\n", "utf-8");
     }
@@ -273,7 +274,19 @@ async function main(): Promise<void> {
 
   // Active promises
   const activePromises = new Map<number, Promise<void>>();
+  const qaReports = new Map<number, string>();
   let shuttingDown = false;
+
+  function printQAReports(): void {
+    if (qaReports.size === 0) return;
+    console.log("");
+    for (const [taskId, report] of qaReports) {
+      const task = filteredTasks.find(t => t.id === taskId);
+      const title = task?.title ?? "QA Validation";
+      console.log(`\x1b[1mT${taskId}: ${title}\x1b[0m`);
+      console.log(report);
+    }
+  }
 
   // Dashboard interval
   if (isTTY()) process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
@@ -381,6 +394,14 @@ async function main(): Promise<void> {
           task.lastLine = task.lastLine || `[EXIT ${code}]`;
         }
 
+        // Capture QA report before worktree cleanup
+        if (task.type === "qa") {
+          const qaReportPath = path.join(wp, ".qa-report.md");
+          if (fs.existsSync(qaReportPath)) {
+            qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
+          }
+        }
+
         // Cleanup worktree always
         cleanupWorktree(slug, task.id, args.branch, args.verbose);
         writeProgress(filteredTasks, args.projectPath);
@@ -460,11 +481,13 @@ async function main(): Promise<void> {
   if (failed > 0) {
     console.log(`  \x1b[32m${done} done\x1b[0m, \x1b[31m${failed} failed\x1b[0m of ${filteredTasks.length} tasks`);
     console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
+    printQAReports();
     process.exit(1);
   }
 
   console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
   console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
+  printQAReports();
 
   process.exit(0);
 }

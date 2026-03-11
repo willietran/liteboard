@@ -330,4 +330,11 @@ describe("buildBrief for QA tasks", () => {
     expect(brief).toContain("QA agent");
     expect(brief).toContain("Task 5: Validate integration");
   });
+
+  it("includes .qa-report.md instruction in rules", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain(".qa-report.md");
+    expect(brief).toContain("markdown table");
+  });
 });
