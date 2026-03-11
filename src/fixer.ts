@@ -88,6 +88,7 @@ export interface FixerLoopOpts {
   skipQA: boolean;
   designPath?: string;
   manifestPath?: string;
+  onStatus?: (status: string) => void;
 }
 
 export async function runFixerLoop(
@@ -111,6 +112,7 @@ export async function runFixerLoop(
 
   while (patience > 0) {
     round++;
+    opts.onStatus?.(`round ${round} (patience: ${patience}), agent working`);
     console.log(`\n  Fixer round ${round} (patience: ${patience})`);
 
     // Re-validate build for fresh error context on subsequent rounds
@@ -182,10 +184,12 @@ export async function runFixerLoop(
 
     if (exitCode !== 0) {
       console.log(`  \x1b[31mFixer agent crashed (exit ${exitCode})\x1b[0m`);
+      opts.onStatus?.(`round ${round} — agent crashed, patience: ${patience - 1}`);
       patience--;
       continue;
     }
 
+    opts.onStatus?.(`round ${round} complete, re-validating`);
     // Re-validate
     const newBuildResult = runBuildValidation(repoRoot, { cleanInstall: false, verbose: opts.verbose });
     const currentMetrics: ValidationMetrics = {
@@ -207,10 +211,12 @@ export async function runFixerLoop(
 
     if (isProgress(currentMetrics, previousMetrics)) {
       console.log("  \x1b[33mProgress detected — patience holds\x1b[0m");
+      opts.onStatus?.(`round ${round} — progress detected`);
       previousMetrics = currentMetrics;
     } else {
       // Regression or no progress — rollback only if HEAD is a fixer commit
       console.log("  \x1b[31mNo progress — patience decrements\x1b[0m");
+      opts.onStatus?.(`round ${round} — no progress, patience: ${patience - 1}`);
       try {
         const headMsg = git(["log", "-1", "--format=%s"], { cwd: repoRoot, verbose: opts.verbose });
         if (headMsg.startsWith("fix(integration):")) {

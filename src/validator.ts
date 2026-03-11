@@ -302,16 +302,25 @@ export async function runIntegrationGate(
 ): Promise<IntegrationGateResult> {
   const phases: string[] = [];
   let appProcess: ChildProcess | undefined;
+  let gateStatus = "starting";
+  const gateStart = Date.now();
+  const heartbeat = setInterval(() => {
+    const elapsed = Math.round((Date.now() - gateStart) / 1000);
+    console.log(`  [gate ${elapsed}s] ${gateStatus}`);
+  }, 5000);
 
   try {
     // Phase 1: Clean Build Validation
+    gateStatus = "Phase 1: Build Validation";
     console.log("\n\x1b[1m[Integration Gate] Phase 1: Clean Build Validation\x1b[0m");
     const buildResult = runBuildValidation(repoRoot, { cleanInstall: true, verbose: opts.verbose });
     phases.push("build");
 
     if (buildResult.success) {
+      gateStatus = "Phase 1: Build Validation — passed";
       console.log("  \x1b[32mBuild validation passed\x1b[0m");
     } else {
+      gateStatus = `Phase 1: Build Validation — failed at ${buildResult.failedPhase}`;
       console.log(`  \x1b[31mBuild validation failed at: ${buildResult.failedPhase}\x1b[0m`);
       if (buildResult.tscErrorCount > 0) {
         console.log(`  TypeScript errors: ${buildResult.tscErrorCount}`);
@@ -330,18 +339,23 @@ export async function runIntegrationGate(
       let appUrl: string | undefined;
 
       if (isWebApp && buildResult.success) {
+        const basePort = hashPort(opts.branch);
+        gateStatus = `Phase 2: Smoke Test — starting server on port ${basePort}`;
         console.log("  Starting app server...");
         const serverResult = await startAppServer(repoRoot, projectType, { branch: opts.branch, verbose: opts.verbose });
         if ("error" in serverResult) {
+          gateStatus = "Phase 2: Smoke Test — server failed";
           console.log(`  \x1b[31mServer failed: ${serverResult.error}\x1b[0m`);
           smokeResult = { success: false, projectType, error: serverResult.error };
         } else {
           appProcess = serverResult.process;
           appUrl = serverResult.appUrl;
+          gateStatus = "Phase 2: Smoke Test — server ready, HTTP check";
           console.log(`  Server ready at ${appUrl}, running HTTP check...`);
           smokeResult = await runSmokeTest(repoRoot, projectType, appUrl);
         }
       } else {
+        gateStatus = "Phase 2: Smoke Test";
         // Non-web project types (library, cli, generic) — no server needed
         smokeResult = await runSmokeTest(repoRoot, projectType);
       }
@@ -349,8 +363,10 @@ export async function runIntegrationGate(
       phases.push("smoke");
 
       if (smokeResult.success) {
+        gateStatus = "Phase 2: Smoke Test — passed";
         console.log("  \x1b[32mSmoke test passed\x1b[0m");
       } else {
+        gateStatus = `Phase 2: Smoke Test — failed`;
         console.log(`  \x1b[31mSmoke test failed: ${smokeResult.error}\x1b[0m`);
       }
     }
@@ -358,6 +374,7 @@ export async function runIntegrationGate(
     // Phase 3: Playwright QA (web apps only, if MCP available, server still running)
     let qaReport: QAReport | undefined;
     if (!opts.skipQA && smokeResult?.appUrl && appProcess && isPlaywrightMCPAvailable(repoRoot)) {
+      gateStatus = "Phase 3: QA — running Playwright checks";
       console.log("\n\x1b[1m[Integration Gate] Phase 3: Playwright QA\x1b[0m");
       qaReport = await runQAPhase(repoRoot, tasks, opts.provider, opts.model, smokeResult.appUrl, {
         verbose: opts.verbose,
@@ -366,8 +383,10 @@ export async function runIntegrationGate(
       phases.push("qa");
 
       if (qaReport.totalFailed === 0) {
+        gateStatus = `Phase 3: QA — ${qaReport.totalPassed}/${qaReport.totalPassed} features verified`;
         console.log(`  \x1b[32mQA passed: ${qaReport.totalPassed} features verified\x1b[0m`);
       } else {
+        gateStatus = `Phase 3: QA — ${qaReport.totalPassed}/${qaReport.totalPassed + qaReport.totalFailed} features verified`;
         console.log(`  \x1b[31mQA: ${qaReport.totalFailed} failures, ${qaReport.totalPassed} passed\x1b[0m`);
       }
     } else if (!opts.skipQA) {
@@ -401,6 +420,18 @@ export async function runIntegrationGate(
         }
       } else {
         console.log("\n\x1b[1m[Integration Gate] Phase 4: Fixer Agent\x1b[0m");
+        // Summarize what failed so the user knows what the fixer is working on
+        if (!buildResult.success) {
+          console.log(`  \x1b[33mBuild failed at: ${buildResult.failedPhase}${buildResult.tscErrorCount ? ` (${buildResult.tscErrorCount} TS errors)` : ""}${buildResult.testFailCount ? ` (${buildResult.testFailCount} test failures)` : ""}\x1b[0m`);
+        }
+        if (smokeResult && !smokeResult.success) {
+          console.log(`  \x1b[33mSmoke test failed: ${smokeResult.error}\x1b[0m`);
+        }
+        if (qaReport && qaReport.totalFailed > 0) {
+          console.log(`  \x1b[33mQA: ${qaReport.totalFailed} feature(s) failed\x1b[0m`);
+        }
+        gateStatus = "Phase 4: Fixer — starting";
+        console.log("  Spawning fixer agent to resolve...");
         const initialMetrics = extractMetrics(buildResult, smokeResult, qaReport);
         const errorContext = { buildResult, smokeResult, qaReport };
 
@@ -412,6 +443,7 @@ export async function runIntegrationGate(
           skipQA: opts.skipQA,
           designPath: opts.designPath,
           manifestPath: opts.manifestPath,
+          onStatus: (status) => { gateStatus = `Phase 4: Fixer — ${status}`; },
         });
         phases.push("fixer");
 
@@ -436,6 +468,7 @@ export async function runIntegrationGate(
       phases,
     };
   } finally {
+    clearInterval(heartbeat);
     // Ensure app server is always cleaned up
     if (appProcess) {
       await stopAppServer(appProcess);
