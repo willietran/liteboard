@@ -8,8 +8,21 @@ const CURSOR_HOME = "\x1b[H";
 const CLEAR_TO_EOL = "\x1b[K";
 const CLEAR_BELOW = "\x1b[J";
 
+let forcePipeMode = false;
+
+export function setForcePipeMode(value: boolean): void {
+  forcePipeMode = value;
+}
+
 export function isTTY(): boolean {
-  return !!process.stdout.isTTY;
+  // --no-tui flag: guaranteed override for any environment
+  if (forcePipeMode) return false;
+  // LITEBOARD_NO_TUI=1: env-var override for programmatic invocations
+  if (process.env.LITEBOARD_NO_TUI === "1") return false;
+  // Require BOTH stdout AND stdin to be TTYs.
+  // Background task runners (e.g., Claude Code) may allocate a PTY for stdout
+  // (for ANSI color support) but won't provide interactive stdin.
+  return !!process.stdout.isTTY && !!process.stdin.isTTY;
 }
 
 let lastPipeRenderTime = 0;

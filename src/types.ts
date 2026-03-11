@@ -115,6 +115,7 @@ export interface CLIArgs {
   skipQA: boolean;
   noFixer: boolean;
   fixerPatience: number;
+  noTui: boolean;
 }
 
 // ─── Project Type ────────────────────────────────────────────────────────

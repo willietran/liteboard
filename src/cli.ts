@@ -18,7 +18,7 @@ import {
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
-import { renderStatus, isTTY, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
+import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
 import { buildBrief } from "./brief.js";
 import { runIntegrationGate, gateCleanupProcesses } from "./validator.js";
 
@@ -53,7 +53,8 @@ Options:
   --skip-smoke            Skip smoke test phase
   --skip-qa               Skip Playwright QA phase
   --no-fixer              Report failures without auto-fix
-  --fixer-patience=<N>    Override fixer patience (default: 3)`);
+  --fixer-patience=<N>    Override fixer patience (default: 3)
+  --no-tui                Disable TUI dashboard (line-based output)`);
     process.exit(0);
   }
 
@@ -70,6 +71,7 @@ Options:
   let skipQA = false;
   let noFixer = false;
   let fixerPatience = 3;
+  let noTui = false;
 
   for (const arg of args) {
     if (arg === "run") continue;
@@ -95,6 +97,8 @@ Options:
       noFixer = true;
     } else if (arg.startsWith("--fixer-patience=")) {
       fixerPatience = Math.max(1, parseInt(arg.slice("--fixer-patience=".length), 10));
+    } else if (arg === "--no-tui") {
+      noTui = true;
     } else if (!arg.startsWith("--")) {
       positional.push(arg);
     }
@@ -117,7 +121,7 @@ Options:
     branch = `liteboard/${slug}`;
   }
 
-  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose, skipValidation, skipSmoke, skipQA, noFixer, fixerPatience };
+  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose, skipValidation, skipSmoke, skipQA, noFixer, fixerPatience, noTui };
 }
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
@@ -186,6 +190,7 @@ function ensureGitignores(projectDir: string): void {
 
 async function main(): Promise<void> {
   const args = parseArgs();
+  setForcePipeMode(args.noTui);
   checkPrereqs(args);
   ensureGitignores(args.projectPath);
 
