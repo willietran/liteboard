@@ -75,8 +75,51 @@ Each task must include:
 10. Session-grouping hints
 
 ### QA Task Rules
-- Add QA tasks after implementation phases for iterative validation
-- Add a final QA task that depends on all other tasks (including earlier QA tasks) for full integration validation
+
+#### When to use QA gates (structural criterion)
+
+- **Flat dependency graph** (all tasks are independent — no task depends on another implementation task's output): One final QA task that depends on all implementation tasks. No mid-pipeline gates needed.
+- **Layered dependency graph** (tasks form distinct layers where later tasks consume outputs from earlier tasks): QA gates at layer boundaries, plus a final QA task. A layer boundary exists when you see a fan-out-then-fan-in pattern: a group of parallel tasks completes, and a subsequent group of tasks all depend on their outputs.
+
+#### Gate rules (for multi-phase projects)
+
+1. **Phase-boundary QA gates**: After each logical phase of related tasks, insert a QA task that depends on all tasks in that phase (and any prior QA gates). This validates that the phase's tasks work together correctly.
+
+2. **Blocking gate pattern**: All tasks in the next phase must depend on the QA gate from the previous phase. This makes the QA task a true gate — nothing downstream proceeds until QA passes.
+
+3. **Final integration QA**: The last task in the manifest is always a QA task that depends on all other tasks (including earlier QA gates) for full end-to-end validation. Transitive-redundant dependencies are acceptable here for readability — the final QA task should explicitly list all tasks so the graph is self-documenting.
+
+4. **Gate naming convention**: QA gate tasks should be named clearly (e.g., "QA: Validate Phase 2 integration") so the dependency graph is readable.
+
+5. **Don't force phases where none exist.** If the dependency graph is flat (all tasks are independent), don't artificially group them into phases just to insert QA gates. One final QA task is sufficient.
+
+#### Examples
+
+*These diagrams illustrate the dependency structure, not manifest syntax. In the actual manifest, tasks are listed individually with their `Depends on:` fields wiring the graph.*
+
+**Flat graph (no mid-pipeline gates needed):**
+```
+T1, T2, T3 (parallel, independent)
+    ↓
+T4: Final QA (depends on T1, T2, T3)
+```
+
+**Layered graph (gates at layer boundaries):**
+```
+Phase 1: T1, T2, T3 (parallel)
+    ↓
+T4: QA gate (depends on T1, T2, T3)
+    ↓
+Phase 2: T5, T6 (depend on T4)
+    ↓
+T7: QA gate (depends on T4, T5, T6)
+    ↓
+Phase 3: T8, T9 (depend on T7)
+    ↓
+T10: Final QA (depends on all)
+```
+
+#### QA task format requirements
 - QA tasks must have `**Type:** QA`, requirements describing what to validate, and dependencies on the tasks they validate
 - QA tasks are TDD-Exempt (they validate, not implement)
 - Complexity: typically 2-3 (validation is simpler than implementation)
