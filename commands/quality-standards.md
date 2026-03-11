@@ -42,14 +42,6 @@ For tasks marked TDD (non-Exempt), follow the strict RED → GREEN → REFACTOR 
 
 **Skipping RED verification or writing implementation before tests is a BLOCKING violation.**
 
-## Verification Checklist
+## Verification
 
-Before requesting code review, all three must pass:
-
-```bash
-npx tsc --noEmit    # Type check
-npm run build       # Build
-npm test            # Tests
-```
-
-Failure in any step is a blocking issue — do not proceed to code review until resolved.
+See Phase 5 (Verify) in the workflow — the dedicated verification protocol with retry loop. Do not proceed to code review without passing verification.

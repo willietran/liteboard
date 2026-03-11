@@ -115,17 +115,20 @@ export function buildBrief(
   parts.push("---");
   parts.push("## Workflow");
   parts.push("");
-  parts.push("### Phase 1-2: Explore & Plan, then Plan Review");
+  parts.push("### Phase 1-3: Explore & Plan, then Plan Review");
   parts.push(readCommand("plan-review.md"));
   parts.push("");
-  parts.push("### Phase 3: Implement");
+  parts.push("### Phase 4: Implement");
   if (task.tddPhase && task.tddPhase !== "Exempt") {
     parts.push(`This is a TDD task (${task.tddPhase}). Write a failing test first, verify it fails (RED), then write the minimum implementation to make it pass (GREEN), then refactor. Verify the test suite after each step. Skipping RED verification or writing implementation before tests is a **BLOCKING violation**.`);
   } else {
     parts.push("This task is **TDD-Exempt**. Tests are encouraged but not required first.");
   }
   parts.push("");
-  parts.push("### Phase 4: Code Review");
+  parts.push("### Phase 5: Verify");
+  parts.push(readCommand("verification.md"));
+  parts.push("");
+  parts.push("### Phase 6: Code Review");
   parts.push(readCommand("session-review.md"));
   parts.push("");
   parts.push("### How to process review feedback:");
@@ -147,7 +150,6 @@ export function buildBrief(
   const artDir = artifactsDir(projectDir);
   parts.push(`- Write your memory entry to \`${artDir}/t${task.id}-memory-entry.md\` as your final step before committing`);
   parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
-  parts.push("- Before code review, verify: `npx tsc --noEmit` && `npm run build` && `npm test` all pass");
   parts.push("");
 
   return parts.join("\n");

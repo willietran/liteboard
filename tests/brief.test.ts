@@ -30,6 +30,7 @@ const STUB_COMMANDS: Record<string, string> = {
   "receiving-code-review.md": "# Receiving Code Review\nProcess feedback methodically.",
   "code-reviewer.md": "# Code Reviewer\nEvaluate code against criteria.",
   "quality-standards.md": "# Quality Standards\nEvery task must satisfy these standards.",
+  "verification.md": "# Verification\nRun `npx tsc --noEmit`, `npm run build`, `npm test` in a verification loop.",
   "qa-agent.md": "# QA Agent\nYou are a QA validation agent.",
 };
 
@@ -262,13 +263,24 @@ describe("buildBrief", () => {
     expect(brief).toContain("BLOCKING violation");
   });
 
-  it("includes verification commands in rules section", () => {
+  it("includes verification phase between implement and code review", () => {
     const task = makeTask();
     const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
 
     expect(brief).toContain("tsc --noEmit");
     expect(brief).toContain("npm run build");
     expect(brief).toContain("npm test");
+
+    // Verification phase is properly numbered and ordered
+    expect(brief).toContain("Phase 5: Verify");
+    expect(brief).toContain("Phase 6: Code Review");
+    const verifyIdx = brief.indexOf("Phase 5: Verify");
+    const codeReviewIdx = brief.indexOf("Phase 6: Code Review");
+    expect(verifyIdx).toBeLessThan(codeReviewIdx);
+
+    // Verification commands come from the verification phase, not the rules section
+    const rulesIdx = brief.indexOf("## Rules");
+    expect(brief.indexOf("tsc --noEmit")).toBeLessThan(rulesIdx);
   });
 
   it("includes artifacts path for memory entry in rules", () => {

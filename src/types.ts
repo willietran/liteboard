@@ -17,6 +17,7 @@ export type TaskStage =
   | "Planning"
   | "Plan Review"
   | "Implementing"
+  | "Verifying"
   | "Code Review"
   | "Committing"
   | "Merging"
@@ -27,7 +28,7 @@ export type TaskStage =
 
 // "Merging" is intentionally excluded — it is set by cli.ts, not parsed from agent output.
 export const VALID_STAGE_MARKERS: ReadonlySet<string> = new Set([
-  "Exploring", "Planning", "Plan Review", "Implementing",
+  "Exploring", "Planning", "Plan Review", "Implementing", "Verifying",
   "Code Review", "Committing",
   "Validating", "Smoke Testing", "QA Testing", "Fixing",
 ]);
