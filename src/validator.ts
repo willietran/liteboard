@@ -14,7 +14,7 @@ import type {
   FixerResult,
 } from "./types.js";
 import { runBuildValidation } from "./build-validation.js";
-import { runFixerLoop } from "./fixer.js";
+import { runFixerLoop, isCodeFixable } from "./fixer.js";
 import { runQAPhase, isPlaywrightMCPAvailable } from "./qa.js";
 
 // ─── Cleanup Set ─────────────────────────────────────────────────────────────
@@ -75,17 +75,21 @@ export function hashPort(branchName: string): number {
 
 // ─── Port Check ──────────────────────────────────────────────────────────────
 
-function isPortReady(port: number): Promise<boolean> {
+function tryConnect(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const conn = net.createConnection({ port, host: "127.0.0.1" });
-    conn.on("connect", () => {
-      conn.destroy();
-      resolve(true);
-    });
-    conn.on("error", () => {
-      resolve(false);
-    });
+    const conn = net.createConnection({ port, host });
+    conn.setTimeout(1000);
+    conn.on("connect", () => { conn.destroy(); resolve(true); });
+    conn.on("error", () => { conn.destroy(); resolve(false); });
+    conn.on("timeout", () => { conn.destroy(); resolve(false); });
   });
+}
+
+function isPortReady(port: number): Promise<boolean> {
+  return Promise.all([
+    tryConnect(port, "127.0.0.1"),
+    tryConnect(port, "::1"),
+  ]).then(([v4, v6]) => v4 || v6);
 }
 
 async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
@@ -120,15 +124,15 @@ function killProcess(proc: ChildProcess): Promise<void> {
 
 // ─── App Server Lifecycle ────────────────────────────────────────────────────
 
-function getStartCommand(
+export function getStartCommand(
   projectType: ProjectType,
   port: number,
 ): { cmd: string; args: string[] } {
   switch (projectType) {
     case "nextjs":
-      return { cmd: "npx", args: ["next", "start", "-p", String(port)] };
+      return { cmd: "npx", args: ["next", "start", "--hostname", "127.0.0.1", "-p", String(port)] };
     case "vite":
-      return { cmd: "npx", args: ["vite", "preview", "--port", String(port)] };
+      return { cmd: "npx", args: ["vite", "preview", "--host", "127.0.0.1", "--port", String(port)] };
     case "express":
       return { cmd: "npm", args: ["start"] };
     default:
@@ -140,7 +144,7 @@ function getStartCommand(
 export async function startAppServer(
   repoRoot: string,
   projectType: ProjectType,
-  opts: { branch: string },
+  opts: { branch: string; verbose?: boolean },
 ): Promise<{ process: ChildProcess; port: number; appUrl: string } | { error: string }> {
   const basePort = hashPort(opts.branch);
   let port = basePort;
@@ -155,6 +159,10 @@ export async function startAppServer(
   }
 
   const startCmd = getStartCommand(projectType, port);
+  if (opts.verbose) {
+    console.log(`  Running: ${startCmd.cmd} ${startCmd.args.join(" ")}`);
+  }
+
   const appProcess = nodeSpawn(startCmd.cmd, startCmd.args, {
     cwd: repoRoot,
     stdio: "pipe",
@@ -162,18 +170,26 @@ export async function startAppServer(
   });
   gateCleanupProcesses.add(appProcess);
 
+  const MAX_STDERR_BYTES = 8192;
+  let stderrBuf = "";
+  appProcess.stderr?.on("data", (chunk: Buffer) => {
+    if (stderrBuf.length < MAX_STDERR_BYTES) {
+      stderrBuf += chunk.toString().slice(0, MAX_STDERR_BYTES - stderrBuf.length);
+    }
+  });
+
   let exited = false;
   appProcess.on("close", () => { exited = true; });
 
   const ready = await waitForPort(port, 60_000);
   if (exited) {
     gateCleanupProcesses.delete(appProcess);
-    return { error: "App process exited before port was ready" };
+    return { error: `App process exited before port was ready${stderrBuf ? `\n${stderrBuf}` : ""}` };
   }
   if (!ready) {
     gateCleanupProcesses.delete(appProcess);
     await killProcess(appProcess);
-    return { error: `Port ${port} not ready within 60s` };
+    return { error: `Port ${port} not ready within 60s${stderrBuf ? `\n${stderrBuf}` : ""}` };
   }
 
   return { process: appProcess, port, appUrl: `http://127.0.0.1:${port}` };
@@ -290,7 +306,7 @@ export async function runIntegrationGate(
   try {
     // Phase 1: Clean Build Validation
     console.log("\n\x1b[1m[Integration Gate] Phase 1: Clean Build Validation\x1b[0m");
-    const buildResult = runBuildValidation(repoRoot, { cleanInstall: true });
+    const buildResult = runBuildValidation(repoRoot, { cleanInstall: true, verbose: opts.verbose });
     phases.push("build");
 
     if (buildResult.success) {
@@ -314,12 +330,15 @@ export async function runIntegrationGate(
       let appUrl: string | undefined;
 
       if (isWebApp && buildResult.success) {
-        const serverResult = await startAppServer(repoRoot, projectType, { branch: opts.branch });
+        console.log("  Starting app server...");
+        const serverResult = await startAppServer(repoRoot, projectType, { branch: opts.branch, verbose: opts.verbose });
         if ("error" in serverResult) {
+          console.log(`  \x1b[31mServer failed: ${serverResult.error}\x1b[0m`);
           smokeResult = { success: false, projectType, error: serverResult.error };
         } else {
           appProcess = serverResult.process;
           appUrl = serverResult.appUrl;
+          console.log(`  Server ready at ${appUrl}, running HTTP check...`);
           smokeResult = await runSmokeTest(repoRoot, projectType, appUrl);
         }
       } else {
@@ -373,24 +392,34 @@ export async function runIntegrationGate(
     // Phase 4: Fixer Agent (if any failures and fixer is enabled)
     let fixerResult: FixerResult | undefined;
     if (anyFailed && !opts.noFixer) {
-      console.log("\n\x1b[1m[Integration Gate] Phase 4: Fixer Agent\x1b[0m");
-      const initialMetrics = extractMetrics(buildResult, smokeResult, qaReport);
+      const codeFixable = isCodeFixable(buildResult, smokeResult, qaReport);
 
-      fixerResult = await runFixerLoop(repoRoot, opts.branch, tasks, initialMetrics, opts.provider, opts.model, {
-        fixerPatience: opts.fixerPatience,
-        verbose: opts.verbose,
-        projectDir: opts.projectDir,
-        skipSmoke: opts.skipSmoke,
-        skipQA: opts.skipQA,
-        designPath: opts.designPath,
-        manifestPath: opts.manifestPath,
-      });
-      phases.push("fixer");
-
-      if (fixerResult.converged) {
-        console.log(`  \x1b[32mFixer converged after ${fixerResult.rounds} round(s)\x1b[0m`);
+      if (!codeFixable) {
+        console.log("\n\x1b[33m[Integration Gate] Skipping fixer — failures are infrastructure-only (not code-fixable)\x1b[0m");
+        if (smokeResult && !smokeResult.success) {
+          console.log(`  Smoke test error: ${smokeResult.error}`);
+        }
       } else {
-        console.log(`  \x1b[31mFixer did not converge after ${fixerResult.rounds} round(s)\x1b[0m`);
+        console.log("\n\x1b[1m[Integration Gate] Phase 4: Fixer Agent\x1b[0m");
+        const initialMetrics = extractMetrics(buildResult, smokeResult, qaReport);
+        const errorContext = { buildResult, smokeResult, qaReport };
+
+        fixerResult = await runFixerLoop(repoRoot, opts.branch, tasks, initialMetrics, errorContext, opts.provider, opts.model, {
+          fixerPatience: opts.fixerPatience,
+          verbose: opts.verbose,
+          projectDir: opts.projectDir,
+          skipSmoke: opts.skipSmoke,
+          skipQA: opts.skipQA,
+          designPath: opts.designPath,
+          manifestPath: opts.manifestPath,
+        });
+        phases.push("fixer");
+
+        if (fixerResult.converged) {
+          console.log(`  \x1b[32mFixer converged after ${fixerResult.rounds} round(s)\x1b[0m`);
+        } else {
+          console.log(`  \x1b[31mFixer did not converge after ${fixerResult.rounds} round(s)\x1b[0m`);
+        }
       }
     }
 

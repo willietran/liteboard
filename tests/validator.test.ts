@@ -16,7 +16,7 @@ vi.mock("node:net", () => ({
 }));
 
 import * as fs from "node:fs";
-import { detectProjectType, hashPort } from "../src/validator.js";
+import { detectProjectType, hashPort, getStartCommand } from "../src/validator.js";
 
 const mockExistsSync = vi.mocked(fs.existsSync);
 const mockReadFileSync = vi.mocked(fs.readFileSync);
@@ -176,5 +176,33 @@ describe("hashPort", () => {
 
   it("returns different ports for different branch names", () => {
     expect(hashPort("feature/a")).not.toBe(hashPort("feature/b"));
+  });
+});
+
+// ─── getStartCommand ──────────────────────────────────────────────────────────
+
+describe("getStartCommand", () => {
+  it("returns vite preview with --host 127.0.0.1", () => {
+    const result = getStartCommand("vite", 3000);
+    expect(result.cmd).toBe("npx");
+    expect(result.args).toEqual(["vite", "preview", "--host", "127.0.0.1", "--port", "3000"]);
+  });
+
+  it("returns next start with --hostname 127.0.0.1", () => {
+    const result = getStartCommand("nextjs", 4000);
+    expect(result.cmd).toBe("npx");
+    expect(result.args).toEqual(["next", "start", "--hostname", "127.0.0.1", "-p", "4000"]);
+  });
+
+  it("returns npm start for express without host flags", () => {
+    const result = getStartCommand("express", 5000);
+    expect(result.cmd).toBe("npm");
+    expect(result.args).toEqual(["start"]);
+  });
+
+  it("returns npm start for generic without host flags", () => {
+    const result = getStartCommand("generic", 5000);
+    expect(result.cmd).toBe("npm");
+    expect(result.args).toEqual(["start"]);
   });
 });
