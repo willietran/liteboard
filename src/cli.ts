@@ -300,6 +300,7 @@ async function main(): Promise<void> {
   const dashboardInterval = setInterval(() => {
     renderStatus(filteredTasks, args.projectPath);
   }, 1000);
+  renderStatus(filteredTasks, args.projectPath);
 
   // Graceful shutdown
   process.on("SIGINT", () => {
@@ -472,6 +473,9 @@ async function main(): Promise<void> {
 
   // Integration gate: only run if ALL tasks succeeded
   if (done === filteredTasks.length && !args.skipValidation) {
+    if (!isTTY()) {
+      console.log(`\n${done} tasks merged. Starting integration gate...\n`);
+    }
     // Cursor stays hidden — gate dashboard takes over the screen
     const gateResult = await runIntegrationGate(process.cwd(), filteredTasks, {
       branch: args.branch,

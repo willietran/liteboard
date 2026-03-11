@@ -26,9 +26,6 @@ export function isTTY(): boolean {
   return !!process.stdout.isTTY && !!process.stdin.isTTY;
 }
 
-let lastPipeRenderTime = 0;
-let lastGatePipeRenderTime = 0;
-const PIPE_RENDER_INTERVAL_MS = 5000;
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
@@ -132,12 +129,8 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
       + CLEAR_BELOW;
     process.stdout.write(output);
   } else {
-    const now = Date.now();
-    if (now - lastPipeRenderTime >= PIPE_RENDER_INTERVAL_MS) {
-      lastPipeRenderTime = now;
-      for (const line of lines) {
-        console.log(line);
-      }
+    for (const line of lines) {
+      console.log(line);
     }
   }
 }
@@ -203,12 +196,8 @@ export function renderGateStatus(status: GateStatus): void {
       + CLEAR_BELOW;
     process.stdout.write(output);
   } else {
-    const now = Date.now();
-    if (now - lastGatePipeRenderTime >= PIPE_RENDER_INTERVAL_MS) {
-      lastGatePipeRenderTime = now;
-      for (const line of lines) {
-        console.log(line);
-      }
+    for (const line of lines) {
+      console.log(line);
     }
   }
 }

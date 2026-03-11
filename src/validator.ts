@@ -380,6 +380,7 @@ export async function runIntegrationGate(
     return result;
   } finally {
     clearInterval(renderInterval);
+    if (!isTTY()) renderGateStatus(status);
     if (isTTY()) process.stdout.write(CLEAR_SCREEN + SHOW_CURSOR);
   }
 }
