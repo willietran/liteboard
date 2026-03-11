@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { Task, Provider, StreamEvent, TaskStage } from "./types.js";
 import { VALID_STAGE_MARKERS } from "./types.js";
+import { artifactsDir } from "./paths.js";
 
 /** Grace period for agent startup. Claude Code can take up to ~60s to initialize;
  *  2 minutes gives margin for API cold starts and network latency. */
@@ -26,8 +27,8 @@ export function spawnAgent(
   projectDir: string,
   verbose: boolean,
 ): ChildProcess {
-  // Write brief to temp file
-  const briefPath = path.join(wp, `.brief-t${task.id}.md`);
+  // Write brief to artifacts directory (outside worktree, for debugging only)
+  const briefPath = path.join(artifactsDir(projectDir), `t${task.id}-brief.md`);
   fs.writeFileSync(briefPath, brief, "utf-8");
 
   // Create log directory and file

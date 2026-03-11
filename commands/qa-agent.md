@@ -65,7 +65,7 @@ When you encounter code failures:
 
 ## Completion
 
-Before exiting, **always** write `.qa-report.md` in the current working directory (worktree root) with a summary:
+Before exiting, **always** write a QA report to the path specified in the Rules section, with a summary:
 
 ```markdown
 ## QA Report

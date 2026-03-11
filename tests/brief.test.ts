@@ -270,6 +270,18 @@ describe("buildBrief", () => {
     expect(brief).toContain("npm run build");
     expect(brief).toContain("npm test");
   });
+
+  it("includes artifacts path for memory entry in rules", () => {
+    const task = makeTask({ id: 13 });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("/fake/project/artifacts/t13-memory-entry.md");
+  });
+
+  it("instructs agents to save artifacts outside repo root", () => {
+    const task = makeTask();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("never to the repo root");
+  });
 });
 
 // ─── QA brief ────────────────────────────────────────────────────────────────
@@ -331,10 +343,22 @@ describe("buildBrief for QA tasks", () => {
     expect(brief).toContain("Task 5: Validate integration");
   });
 
-  it("includes .qa-report.md instruction in rules", () => {
+  it("includes qa-report artifact path in rules", () => {
     const task = makeTask({ type: "qa" });
     const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
-    expect(brief).toContain(".qa-report.md");
+    expect(brief).toContain("/fake/project/artifacts/t13-qa-report.md");
     expect(brief).toContain("markdown table");
+  });
+
+  it("includes artifacts path for memory entry in rules", () => {
+    const task = makeTask({ id: 20, type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("/fake/project/artifacts/t20-memory-entry.md");
+  });
+
+  it("instructs agents to save artifacts outside repo root", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("never to the repo root");
   });
 });

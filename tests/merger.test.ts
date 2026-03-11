@@ -96,7 +96,7 @@ describe("squashMerge — trial merge succeeds", () => {
     expect(gitCalls()).toContainEqual(["commit", "-m", "feat: add widget"]);
   });
 
-  it("removes ephemeral files from staging before commit", async () => {
+  it("removes ephemeral files (including .qa-report.md) from staging before commit", async () => {
     await squashMerge(5, "proj", "feat/x", "fix: stuff", false);
 
     expect(gitCalls()).toContainEqual(
@@ -106,6 +106,7 @@ describe("squashMerge — trial merge succeeds", () => {
         "--",
         ".memory-entry.md",
         ".brief-t5.md",
+        ".qa-report.md",
       ]),
     );
 
@@ -115,6 +116,15 @@ describe("squashMerge — trial merge succeeds", () => {
     );
     const commitIdx = calls.findIndex((c) => c[0] === "commit");
     expect(resetIdx).toBeLessThan(commitIdx);
+  });
+
+  it("deletes ephemeral files from disk after unstaging", async () => {
+    await squashMerge(5, "proj", "feat/x", "fix: stuff", false);
+
+    const unlinkCalls = vi.mocked(fs.unlinkSync).mock.calls.map(c => c[0]);
+    expect(unlinkCalls).toContain(".memory-entry.md");
+    expect(unlinkCalls).toContain(".brief-t5.md");
+    expect(unlinkCalls).toContain(".qa-report.md");
   });
 
   it("stages lockfile after build validation", async () => {

@@ -45,13 +45,12 @@ export async function squashMerge(
       // Step 1: Trial merge — checkout feature branch and attempt squash merge
       git(["checkout", featureBranch], { verbose });
 
-      // Remove ephemeral files from disk
-      try {
-        fs.unlinkSync(".memory-entry.md");
-      } catch {}
-      try {
-        fs.unlinkSync(`.brief-t${taskId}.md`);
-      } catch {}
+      // Defense-in-depth: clean up ephemeral files that agents may have committed
+      // to the task branch despite being instructed to write to the artifacts directory.
+      const ephemeralFiles = [".memory-entry.md", `.brief-t${taskId}.md`, ".qa-report.md"];
+      for (const f of ephemeralFiles) {
+        try { fs.unlinkSync(f); } catch {}
+      }
 
       try {
         git(["merge", "--squash", "--no-commit", taskBranch], { verbose });
@@ -114,13 +113,13 @@ export async function squashMerge(
         }
       }
 
-      // Remove ephemeral files from staging before commit
+      // Remove ephemeral files from staging and disk before commit
       try {
-        git(
-          ["reset", "HEAD", "--", ".memory-entry.md", `.brief-t${taskId}.md`],
-          { verbose },
-        );
+        git(["reset", "HEAD", "--", ...ephemeralFiles], { verbose });
       } catch {}
+      for (const f of ephemeralFiles) {
+        try { fs.unlinkSync(f); } catch {}
+      }
 
       // Step 3: Validate — install deps (if needed) and run build
       const buildResult = runBuildValidation(repoRoot, { cleanInstall: false, timeout: NPM_TIMEOUT_MS });

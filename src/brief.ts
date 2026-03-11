@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task } from "./types.js";
 import { readMemorySnapshot } from "./memory.js";
+import { artifactsDir } from "./paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const commandsDir = path.resolve(__dirname, "..", "commands");
@@ -143,9 +144,9 @@ export function buildBrief(
   parts.push(`- **Feature branch**: \`${featureBranch}\``);
   parts.push("- Do NOT touch files unrelated to this task");
   parts.push("- Do NOT push to remote");
-  parts.push(
-    "- Write `.memory-entry.md` as your final step before committing",
-  );
+  const artDir = artifactsDir(projectDir);
+  parts.push(`- Write your memory entry to \`${artDir}/t${task.id}-memory-entry.md\` as your final step before committing`);
+  parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
   parts.push("- Before code review, verify: `npx tsc --noEmit` && `npm run build` && `npm test` all pass");
   parts.push("");
 
@@ -232,8 +233,10 @@ function buildQABrief(
   parts.push(`- **Feature branch**: \`${featureBranch}\``);
   parts.push("- Do NOT touch files unrelated to this task");
   parts.push("- Do NOT push to remote");
-  parts.push("- If you made code fixes, write `.memory-entry.md` summarizing what you fixed before committing");
-  parts.push("- **Always** write `.qa-report.md` in the current working directory with a markdown table of all tests and results");
+  const artDir = artifactsDir(projectDir);
+  parts.push(`- If you made code fixes, write memory entry to \`${artDir}/t${task.id}-memory-entry.md\` summarizing what you fixed`);
+  parts.push(`- **Always** write QA report to \`${artDir}/t${task.id}-qa-report.md\` with a markdown table of all tests and results`);
+  parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
   parts.push("- Use standard `[STAGE: ...]` markers as described in the workflow above");
   parts.push("");
 

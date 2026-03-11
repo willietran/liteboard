@@ -39,4 +39,4 @@ Adhere to the Quality Standards section included in this brief. All standards ar
 
 - Do not touch files unrelated to your task. If you discover a bug elsewhere, note it but do not fix it.
 - Use the exact commit message provided to you. Do not modify it.
-- As your final step, write a `.memory-entry.md` file summarizing what was done, decisions made, and anything the next agent should know.
+- As your final step, write a memory entry summarizing what was done, decisions made, and anything the next agent should know. See the Rules section for the exact output path.

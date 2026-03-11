@@ -21,6 +21,7 @@ import { spawnAgent } from "./spawner.js";
 import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
 import { buildBrief } from "./brief.js";
 import { git } from "./git.js";
+import { artifactsDir } from "./paths.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -153,6 +154,14 @@ function ensureGitignores(projectDir: string): void {
     fs.writeFileSync(logsGitignore, "*\n", "utf-8");
   }
 
+  // Ensure artifacts/.gitignore
+  const artDir = artifactsDir(projectDir);
+  if (!fs.existsSync(artDir)) fs.mkdirSync(artDir, { recursive: true });
+  const artifactsGitignore = path.join(artDir, ".gitignore");
+  if (!fs.existsSync(artifactsGitignore)) {
+    fs.writeFileSync(artifactsGitignore, "*\n!.gitignore\n", "utf-8");
+  }
+
   // Ensure repo .gitignore has ephemeral patterns
   const repoGitignore = path.resolve(".gitignore");
   if (fs.existsSync(repoGitignore)) {
@@ -239,6 +248,15 @@ async function main(): Promise<void> {
 
   // Startup cleanup
   cleanupStaleWorktrees(slug, args.verbose);
+
+  // Clean up artifacts from previous runs
+  const artDir = artifactsDir(args.projectPath);
+  if (fs.existsSync(artDir)) {
+    for (const f of fs.readdirSync(artDir)) {
+      if (f === ".gitignore") continue;
+      try { fs.unlinkSync(path.join(artDir, f)); } catch {}
+    }
+  }
 
   // Resume detection
   const previousProgress = readProgress(args.projectPath);
@@ -345,8 +363,8 @@ async function main(): Promise<void> {
       child.on("close", async (code) => {
         if (code === 0) {
           try {
-            // Read memory entry from worktree
-            const memEntryPath = path.join(wp, ".memory-entry.md");
+            // Read memory entry from artifacts directory
+            const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
             let memBody = "";
             if (fs.existsSync(memEntryPath)) {
               memBody = fs.readFileSync(memEntryPath, "utf-8");
@@ -394,9 +412,9 @@ async function main(): Promise<void> {
           task.lastLine = task.lastLine || `[EXIT ${code}]`;
         }
 
-        // Capture QA report before worktree cleanup
+        // Capture QA report from artifacts directory
         if (task.type === "qa") {
-          const qaReportPath = path.join(wp, ".qa-report.md");
+          const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
           if (fs.existsSync(qaReportPath)) {
             qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
           }

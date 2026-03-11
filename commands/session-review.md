@@ -21,7 +21,7 @@ Spawn an independent review subagent to evaluate the implementation diff before 
 
 4. If changes were made, regenerate the diff and resubmit to the reviewer.
 
-5. **Max 3 rounds.** If the review has not converged after 3 rounds, note the unresolved items and proceed with the commit, documenting outstanding concerns in `.memory-entry.md`.
+5. **Max 3 rounds.** If the review has not converged after 3 rounds, note the unresolved items and proceed with the commit, documenting outstanding concerns in your memory entry (see the Rules section for the output path).
 
 ## Output
 
