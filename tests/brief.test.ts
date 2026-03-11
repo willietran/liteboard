@@ -18,8 +18,8 @@ vi.mock("../src/memory.js", () => ({
 
 import { readFileSync } from "node:fs";
 import { readMemorySnapshot } from "../src/memory.js";
-import { buildBrief } from "../src/brief.js";
-import type { Task } from "../src/types.js";
+import { buildBrief, formatFixerErrors } from "../src/brief.js";
+import type { Task, FixerErrorContext } from "../src/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -268,5 +268,122 @@ describe("buildBrief", () => {
     expect(brief).toContain("tsc --noEmit");
     expect(brief).toContain("npm run build");
     expect(brief).toContain("npm test");
+  });
+});
+
+// ─── formatFixerErrors ──────────────────────────────────────────────────────
+
+describe("formatFixerErrors", () => {
+  it("formats passing build phase", () => {
+    const ctx: FixerErrorContext = {
+      buildResult: {
+        success: true,
+        failedPhase: "none",
+        tscErrorCount: 0,
+        testFailCount: 0,
+        testPassCount: 5,
+      },
+    };
+    const output = formatFixerErrors(ctx);
+    expect(output).toContain("### Build Phase: PASSED");
+  });
+
+  it("formats failing build with tsc errors and stderr", () => {
+    const ctx: FixerErrorContext = {
+      buildResult: {
+        success: false,
+        failedPhase: "typecheck",
+        tscErrorCount: 3,
+        testFailCount: 0,
+        testPassCount: 0,
+        stderr: "src/foo.ts(1,1): error TS2304: cannot find name",
+      },
+    };
+    const output = formatFixerErrors(ctx);
+    expect(output).toContain("### Build Phase: FAILED at `typecheck`");
+    expect(output).toContain("TypeScript errors: 3");
+    expect(output).toContain("error TS2304");
+  });
+
+  it("formats failing build with test failures", () => {
+    const ctx: FixerErrorContext = {
+      buildResult: {
+        success: false,
+        failedPhase: "test",
+        tscErrorCount: 0,
+        testFailCount: 2,
+        testPassCount: 10,
+        stderr: "FAIL src/foo.test.ts",
+      },
+    };
+    const output = formatFixerErrors(ctx);
+    expect(output).toContain("Test failures: 2 (10 passed)");
+  });
+
+  it("formats failing smoke test with error details", () => {
+    const ctx: FixerErrorContext = {
+      buildResult: {
+        success: true,
+        failedPhase: "none",
+        tscErrorCount: 0,
+        testFailCount: 0,
+        testPassCount: 5,
+      },
+      smokeResult: {
+        success: false,
+        projectType: "vite",
+        error: "HTTP check returned 500",
+        appUrl: "http://127.0.0.1:12345",
+      },
+    };
+    const output = formatFixerErrors(ctx);
+    expect(output).toContain("### Smoke Test: FAILED");
+    expect(output).toContain("HTTP check returned 500");
+    expect(output).toContain("http://127.0.0.1:12345");
+  });
+
+  it("formats QA failures with feature names", () => {
+    const ctx: FixerErrorContext = {
+      buildResult: {
+        success: true,
+        failedPhase: "none",
+        tscErrorCount: 0,
+        testFailCount: 0,
+        testPassCount: 5,
+      },
+      qaReport: {
+        features: [
+          { name: "Login", passed: true },
+          { name: "Task creation", passed: false, error: "Submit button broken" },
+          { name: "Settings", passed: false, error: "Page not found" },
+        ],
+        totalPassed: 1,
+        totalFailed: 2,
+      },
+    };
+    const output = formatFixerErrors(ctx);
+    expect(output).toContain("### QA Phase: 2 of 3 features failed");
+    expect(output).toContain("[QA:FAIL] Task creation: Submit button broken");
+    expect(output).toContain("[QA:FAIL] Settings: Page not found");
+    expect(output).not.toContain("Login");
+  });
+
+  it("formats all-passing QA", () => {
+    const ctx: FixerErrorContext = {
+      buildResult: {
+        success: true,
+        failedPhase: "none",
+        tscErrorCount: 0,
+        testFailCount: 0,
+        testPassCount: 5,
+      },
+      qaReport: {
+        features: [{ name: "Login", passed: true }],
+        totalPassed: 1,
+        totalFailed: 0,
+      },
+    };
+    const output = formatFixerErrors(ctx);
+    expect(output).toContain("### QA Phase: PASSED (1 features verified)");
   });
 });

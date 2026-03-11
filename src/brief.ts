@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Task } from "./types.js";
+import type { Task, FixerErrorContext } from "./types.js";
 import { readMemorySnapshot } from "./memory.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -146,10 +146,64 @@ export function buildBrief(
   return parts.join("\n");
 }
 
+// ─── Fixer Error Formatting ───────────────────────────────────────────────────
+
+export function formatFixerErrors(ctx: FixerErrorContext): string {
+  const sections: string[] = [];
+
+  // Build phase
+  if (ctx.buildResult.success) {
+    sections.push("### Build Phase: PASSED");
+  } else {
+    sections.push(`### Build Phase: FAILED at \`${ctx.buildResult.failedPhase}\``);
+    if (ctx.buildResult.tscErrorCount > 0) {
+      sections.push(`- TypeScript errors: ${ctx.buildResult.tscErrorCount}`);
+    }
+    if (ctx.buildResult.testFailCount > 0) {
+      sections.push(`- Test failures: ${ctx.buildResult.testFailCount} (${ctx.buildResult.testPassCount} passed)`);
+    }
+    if (ctx.buildResult.stderr) {
+      const previewLines = ctx.buildResult.stderr.split("\n").slice(0, 30);
+      sections.push("```");
+      sections.push(previewLines.join("\n"));
+      sections.push("```");
+    }
+  }
+
+  // Smoke test phase
+  if (ctx.smokeResult) {
+    if (ctx.smokeResult.success) {
+      sections.push("### Smoke Test: PASSED");
+    } else {
+      sections.push("### Smoke Test: FAILED");
+      sections.push(`- ${ctx.smokeResult.error ?? "Unknown error"}`);
+      if (ctx.smokeResult.appUrl) {
+        sections.push(`- App URL: ${ctx.smokeResult.appUrl}`);
+      }
+    }
+  }
+
+  // QA phase
+  if (ctx.qaReport) {
+    if (ctx.qaReport.totalFailed === 0) {
+      sections.push(`### QA Phase: PASSED (${ctx.qaReport.totalPassed} features verified)`);
+    } else {
+      sections.push(`### QA Phase: ${ctx.qaReport.totalFailed} of ${ctx.qaReport.totalPassed + ctx.qaReport.totalFailed} features failed`);
+      for (const f of ctx.qaReport.features) {
+        if (!f.passed) {
+          sections.push(`- [QA:FAIL] ${f.name}${f.error ? `: ${f.error}` : ""}`);
+        }
+      }
+    }
+  }
+
+  return sections.join("\n");
+}
+
 // ─── Fixer Brief ─────────────────────────────────────────────────────────────
 
 export function buildFixerBrief(
-  errors: string,
+  errorContext: FixerErrorContext,
   diff: string,
   tasks: Task[],
   projectDir: string,
@@ -163,12 +217,10 @@ export function buildFixerBrief(
   parts.push(readCommand("fixer-agent.md"));
   parts.push("");
 
-  // Error context
+  // Structured error context
   parts.push("---");
   parts.push("## Errors to Fix");
-  parts.push("```");
-  parts.push(errors.trim());
-  parts.push("```");
+  parts.push(formatFixerErrors(errorContext));
   parts.push("");
 
   // Reference documents

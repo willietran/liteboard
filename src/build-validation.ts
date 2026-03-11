@@ -12,6 +12,7 @@ export const NPM_TIMEOUT_MS = 120_000;
 export interface BuildValidationOpts {
   cleanInstall: boolean;
   timeout?: number;
+  verbose?: boolean;
 }
 
 /**
@@ -36,7 +37,10 @@ export function runBuildValidation(
     };
   }
 
+  const log = opts.verbose ? (msg: string) => console.log(`  ${msg}`) : () => {};
+
   // Phase 1: Install dependencies
+  log(opts.cleanInstall ? "Running npm ci..." : "Running npm install...");
   try {
     const installCmd = opts.cleanInstall ? "ci" : "install";
     execFileSync("npm", [installCmd], {
@@ -46,11 +50,14 @@ export function runBuildValidation(
       timeout,
     });
   } catch (e: unknown) {
+    const stderr = getErrorStderr(e);
+    log(`\x1b[31mInstall failed\x1b[0m`);
+    if (stderr) logStderrPreview(log, stderr);
     return {
       success: false,
       failedPhase: "install",
       error: getErrorMessage(e),
-      stderr: getErrorStderr(e),
+      stderr,
       tscErrorCount: 0,
       testFailCount: 0,
       testPassCount: 0,
@@ -58,6 +65,7 @@ export function runBuildValidation(
   }
 
   // Phase 2: Type check
+  log("Running npx tsc --noEmit...");
   let tscErrorCount = 0;
   try {
     execFileSync("npx", ["tsc", "--noEmit"], {
@@ -69,6 +77,8 @@ export function runBuildValidation(
   } catch (e: unknown) {
     const stderr = getErrorStderr(e);
     tscErrorCount = (stderr.match(/error TS\d+/g) || []).length;
+    log(`\x1b[31mTypecheck failed (${tscErrorCount || 1} error(s))\x1b[0m`);
+    if (stderr) logStderrPreview(log, stderr);
     return {
       success: false,
       failedPhase: "typecheck",
@@ -81,6 +91,7 @@ export function runBuildValidation(
   }
 
   // Phase 3: Build
+  log("Running npm run build...");
   try {
     execFileSync("npm", ["run", "build"], {
       cwd: repoRoot,
@@ -89,11 +100,14 @@ export function runBuildValidation(
       timeout,
     });
   } catch (e: unknown) {
+    const stderr = getErrorStderr(e);
+    log(`\x1b[31mBuild failed\x1b[0m`);
+    if (stderr) logStderrPreview(log, stderr);
     return {
       success: false,
       failedPhase: "build",
       error: getErrorMessage(e),
-      stderr: getErrorStderr(e),
+      stderr,
       tscErrorCount: 0,
       testFailCount: 0,
       testPassCount: 0,
@@ -116,6 +130,7 @@ export function runBuildValidation(
   let testPassCount = 0;
 
   if (hasTestScript) {
+    log("Running npm test...");
     try {
       const output = execFileSync("npm", ["test"], {
         cwd: repoRoot,
@@ -133,6 +148,8 @@ export function runBuildValidation(
       const counts = parseTestCounts(stdout + "\n" + stderr);
       testFailCount = counts.failed || 1;
       testPassCount = counts.passed;
+      log(`\x1b[31mTests failed (${testFailCount} failure(s), ${testPassCount} passed)\x1b[0m`);
+      if (stderr) logStderrPreview(log, stderr);
       return {
         success: false,
         failedPhase: "test",
@@ -152,6 +169,21 @@ export function runBuildValidation(
     testFailCount: 0,
     testPassCount,
   };
+}
+
+// ─── Stderr Preview ──────────────────────────────────────────────────────
+
+const STDERR_PREVIEW_LINES = 20;
+
+function logStderrPreview(log: (msg: string) => void, stderr: string): void {
+  const allLines = stderr.split("\n");
+  const preview = allLines.slice(0, STDERR_PREVIEW_LINES);
+  for (const line of preview) {
+    log(`  ${line}`);
+  }
+  if (allLines.length > STDERR_PREVIEW_LINES) {
+    log(`  ... (${allLines.length - STDERR_PREVIEW_LINES} more lines)`);
+  }
 }
 
 // ─── Test Output Parsing ─────────────────────────────────────────────────────

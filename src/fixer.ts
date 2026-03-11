@@ -4,7 +4,11 @@ import type {
   Task,
   ValidationMetrics,
   FixerResult,
+  FixerErrorContext,
   Provider,
+  BuildValidationResult,
+  SmokeTestResult,
+  QAReport,
 } from "./types.js";
 import { runBuildValidation } from "./build-validation.js";
 import { git } from "./git.js";
@@ -41,6 +45,39 @@ function isBuildPassing(metrics: ValidationMetrics): boolean {
   );
 }
 
+// ─── Code-Fixable Check ──────────────────────────────────────────────────────
+
+/** Infrastructure-only smoke failures (port/timeout) are not code-fixable. */
+const INFRA_SMOKE_ERRORS = [
+  "All ports",
+  "not ready within",
+  "App process exited before port was ready",
+  "No app URL",
+];
+
+/** Returns true if at least one failure is a code issue (build/test/QA), not infrastructure-only. */
+export function isCodeFixable(
+  buildResult: BuildValidationResult,
+  smokeResult?: SmokeTestResult,
+  qaReport?: QAReport,
+): boolean {
+  // Build/typecheck/test failures are always code-fixable
+  if (!buildResult.success) return true;
+
+  // QA failures are code-fixable
+  if (qaReport && qaReport.totalFailed > 0) return true;
+
+  // Smoke failures: check if infrastructure-only
+  if (smokeResult && !smokeResult.success) {
+    const error = smokeResult.error ?? "";
+    const isInfra = INFRA_SMOKE_ERRORS.some((pat) => error.includes(pat));
+    // HTTP 500 or app crash are code-fixable; port/timeout are not
+    return !isInfra;
+  }
+
+  return false;
+}
+
 // ─── Fixer Loop ──────────────────────────────────────────────────────────────
 
 export interface FixerLoopOpts {
@@ -58,12 +95,14 @@ export async function runFixerLoop(
   branch: string,
   tasks: Task[],
   initialMetrics: ValidationMetrics,
+  initialErrorContext: FixerErrorContext,
   provider: Provider,
   model: string,
   opts: FixerLoopOpts,
 ): Promise<FixerResult> {
   let patience = opts.fixerPatience;
   let previousMetrics = initialMetrics;
+  let currentErrorContext = initialErrorContext;
   let round = 0;
 
   // Ensure logs directory exists
@@ -74,11 +113,15 @@ export async function runFixerLoop(
     round++;
     console.log(`\n  Fixer round ${round} (patience: ${patience})`);
 
-    // Build error context for fixer brief
-    const buildResult = runBuildValidation(repoRoot, { cleanInstall: false });
-    const errorContext = buildResult.success
-      ? "Build passes but other validation phases failed."
-      : `Build failed at: ${buildResult.failedPhase}\n${buildResult.stderr || buildResult.error || ""}`;
+    // Re-validate build for fresh error context on subsequent rounds
+    if (round > 1) {
+      const freshBuild = runBuildValidation(repoRoot, { cleanInstall: false, verbose: opts.verbose });
+      currentErrorContext = {
+        buildResult: freshBuild,
+        smokeResult: currentErrorContext.smokeResult,
+        qaReport: currentErrorContext.qaReport,
+      };
+    }
 
     let diff = "";
     try {
@@ -88,7 +131,7 @@ export async function runFixerLoop(
     }
 
     const brief = buildFixerBrief(
-      errorContext,
+      currentErrorContext,
       diff,
       tasks,
       opts.projectDir,
@@ -101,6 +144,7 @@ export async function runFixerLoop(
     const logFile = path.join(logsDir, `fixer-round${round}.jsonl`);
     const logStream = fs.createWriteStream(logFile, { flags: "w" });
 
+    console.log("  \x1b[36mFixer agent started\x1b[0m");
     const child = provider.spawn({
       prompt: brief,
       model,
@@ -109,9 +153,25 @@ export async function runFixerLoop(
     });
     gateCleanupProcesses.add(child);
 
-    // Wait for agent to finish
+    // Wait for agent to finish, streaming tool activity
+    let lineBuffer = "";
     const exitCode = await new Promise<number | null>((resolve) => {
-      child.stdout?.on("data", (chunk: Buffer) => logStream.write(chunk));
+      child.stdout?.on("data", (chunk: Buffer) => {
+        logStream.write(chunk);
+
+        // Parse stdout for tool-use markers to show progress
+        lineBuffer += chunk.toString();
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line.includes('"tool_name"')) {
+            const toolMatch = line.match(/"tool_name":\s*"([^"]+)"/);
+            if (toolMatch) {
+              console.log(`  \x1b[90m  → ${toolMatch[1]}\x1b[0m`);
+            }
+          }
+        }
+      });
       child.stderr?.on("data", (chunk: Buffer) => logStream.write(`[stderr] ${chunk.toString()}\n`));
       child.on("close", (code) => {
         logStream.end();
@@ -127,7 +187,7 @@ export async function runFixerLoop(
     }
 
     // Re-validate
-    const newBuildResult = runBuildValidation(repoRoot, { cleanInstall: false });
+    const newBuildResult = runBuildValidation(repoRoot, { cleanInstall: false, verbose: opts.verbose });
     const currentMetrics: ValidationMetrics = {
       tscErrorCount: newBuildResult.tscErrorCount,
       testFailCount: newBuildResult.testFailCount,

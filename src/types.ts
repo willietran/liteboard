@@ -173,6 +173,12 @@ export interface IntegrationGateResult {
 
 // ─── Fixer ───────────────────────────────────────────────────────────────
 
+export interface FixerErrorContext {
+  buildResult: BuildValidationResult;
+  smokeResult?: SmokeTestResult;
+  qaReport?: QAReport;
+}
+
 export interface FixerResult {
   rounds: number;
   converged: boolean;

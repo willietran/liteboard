@@ -163,17 +163,36 @@ export async function runQAPhase(
   gateCleanupProcesses.add(child);
 
   let output = "";
+  let lineBuffer = "";
 
   const exitCode = await new Promise<number | null>((resolve) => {
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       output += text;
       logStream.write(chunk);
+
+      // Stream QA markers to console in real-time
+      lineBuffer += text;
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.includes("[QA:PASS]")) {
+          console.log(`  \x1b[32m${line.trim()}\x1b[0m`);
+        } else if (line.includes("[QA:FAIL]")) {
+          console.log(`  \x1b[31m${line.trim()}\x1b[0m`);
+        }
+      }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       logStream.write(`[stderr] ${chunk.toString()}\n`);
     });
     child.on("close", (code) => {
+      // Flush remaining line buffer
+      if (lineBuffer.includes("[QA:PASS]")) {
+        console.log(`  \x1b[32m${lineBuffer.trim()}\x1b[0m`);
+      } else if (lineBuffer.includes("[QA:FAIL]")) {
+        console.log(`  \x1b[31m${lineBuffer.trim()}\x1b[0m`);
+      }
       logStream.end();
       gateCleanupProcesses.delete(child);
       resolve(code);
