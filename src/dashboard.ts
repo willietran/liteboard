@@ -19,9 +19,10 @@ export function isTTY(): boolean {
   if (forcePipeMode) return false;
   // LITEBOARD_NO_TUI=1: env-var override for programmatic invocations
   if (process.env.LITEBOARD_NO_TUI === "1") return false;
-  // Require BOTH stdout AND stdin to be TTYs.
-  // Background task runners (e.g., Claude Code) may allocate a PTY for stdout
-  // (for ANSI color support) but won't provide interactive stdin.
+  // Claude Code's background task runner allocates a full PTY (both stdin
+  // and stdout report isTTY=true), but reads the raw byte stream — not a
+  // terminal screen buffer. Cursor-positioning escapes corrupt the output.
+  if (process.env.CLAUDECODE === "1") return false;
   return !!process.stdout.isTTY && !!process.stdin.isTTY;
 }
 
