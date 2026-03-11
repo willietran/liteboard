@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Task, FixerErrorContext } from "./types.js";
+import type { Task, ProjectType } from "./types.js";
 import { readMemorySnapshot } from "./memory.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -146,93 +146,57 @@ export function buildBrief(
   return parts.join("\n");
 }
 
-// ─── Fixer Error Formatting ───────────────────────────────────────────────────
+// ─── Gate Agent Brief ─────────────────────────────────────────────────────────
 
-export function formatFixerErrors(ctx: FixerErrorContext): string {
-  const sections: string[] = [];
-
-  // Build phase
-  if (ctx.buildResult.success) {
-    sections.push("### Build Phase: PASSED");
-  } else {
-    sections.push(`### Build Phase: FAILED at \`${ctx.buildResult.failedPhase}\``);
-    if (ctx.buildResult.tscErrorCount > 0) {
-      sections.push(`- TypeScript errors: ${ctx.buildResult.tscErrorCount}`);
-    }
-    if (ctx.buildResult.testFailCount > 0) {
-      sections.push(`- Test failures: ${ctx.buildResult.testFailCount} (${ctx.buildResult.testPassCount} passed)`);
-    }
-    if (ctx.buildResult.stderr) {
-      const previewLines = ctx.buildResult.stderr.split("\n").slice(0, 30);
-      sections.push("```");
-      sections.push(previewLines.join("\n"));
-      sections.push("```");
-    }
-  }
-
-  // Smoke test phase
-  if (ctx.smokeResult) {
-    if (ctx.smokeResult.success) {
-      sections.push("### Smoke Test: PASSED");
-    } else {
-      sections.push("### Smoke Test: FAILED");
-      sections.push(`- ${ctx.smokeResult.error ?? "Unknown error"}`);
-      if (ctx.smokeResult.appUrl) {
-        sections.push(`- App URL: ${ctx.smokeResult.appUrl}`);
-      }
-    }
-  }
-
-  // QA phase
-  if (ctx.qaReport) {
-    if (ctx.qaReport.totalFailed === 0) {
-      sections.push(`### QA Phase: PASSED (${ctx.qaReport.totalPassed} features verified)`);
-    } else {
-      sections.push(`### QA Phase: ${ctx.qaReport.totalFailed} of ${ctx.qaReport.totalPassed + ctx.qaReport.totalFailed} features failed`);
-      for (const f of ctx.qaReport.features) {
-        if (!f.passed) {
-          sections.push(`- [QA:FAIL] ${f.name}${f.error ? `: ${f.error}` : ""}`);
-        }
-      }
-    }
-  }
-
-  return sections.join("\n");
+export interface GateAgentBriefOpts {
+  projectType: ProjectType;
+  port: number;
+  startCommand: { cmd: string; args: string[] };
+  skipSmoke: boolean;
+  skipQA: boolean;
+  noFixer: boolean;
+  fixerPatience: number;
+  playwrightAvailable: boolean;
+  designPath?: string;
+  manifestPath?: string;
 }
 
-// ─── Fixer Brief ─────────────────────────────────────────────────────────────
-
-export function buildFixerBrief(
-  errorContext: FixerErrorContext,
-  diff: string,
+export function buildGateAgentBrief(
   tasks: Task[],
-  projectDir: string,
-  designPath?: string,
-  manifestPath?: string,
-  featureBranch?: string,
+  opts: GateAgentBriefOpts,
 ): string {
   const parts: string[] = [];
 
-  // Fixer agent instructions
-  parts.push(readCommand("fixer-agent.md"));
+  // Gate agent workflow instructions
+  parts.push(readCommand("gate-agent.md"));
   parts.push("");
 
-  // Structured error context
+  // Project context
   parts.push("---");
-  parts.push("## Errors to Fix");
-  parts.push(formatFixerErrors(errorContext));
+  parts.push("## Project Context");
+  parts.push(`- **Project type:** ${opts.projectType}`);
+  parts.push(`- **Port:** ${opts.port}`);
+  parts.push(`- **Start command:** \`${opts.startCommand.cmd} ${opts.startCommand.args.join(" ")}\``);
+  parts.push("");
+
+  // Skip flags
+  if (opts.skipSmoke) parts.push("**SKIP_SMOKE** is set — skip Step 2 (Smoke Test).");
+  if (opts.skipQA) parts.push("**SKIP_QA** is set — skip Step 3 (QA).");
+  if (opts.noFixer) parts.push("**NO_FIXER** is set — report failures without spawning fixer sub-agents.");
+  if (!opts.playwrightAvailable) parts.push("**Playwright MCP is not available** — skip Step 3 (QA).");
+  parts.push(`**MAX_FIX_ATTEMPTS:** ${opts.fixerPatience}`);
   parts.push("");
 
   // Reference documents
-  if (designPath || manifestPath) {
+  if (opts.designPath || opts.manifestPath) {
     parts.push("**Reference documents:**");
-    if (designPath) parts.push(`- Design doc: \`${designPath}\``);
-    if (manifestPath) parts.push(`- Task manifest: \`${manifestPath}\``);
+    if (opts.designPath) parts.push(`- Design doc: \`${opts.designPath}\``);
+    if (opts.manifestPath) parts.push(`- Task manifest: \`${opts.manifestPath}\``);
     parts.push("");
   }
 
-  // Task summary
-  parts.push("## Task Manifest Summary");
+  // Task manifest with requirements
+  parts.push("## Task Manifest");
   for (const task of tasks) {
     parts.push(`- **Task ${task.id}: ${task.title}**`);
     if (task.creates.length > 0) {
@@ -241,32 +205,13 @@ export function buildFixerBrief(
     if (task.modifies.length > 0) {
       parts.push(`  Modifies: ${task.modifies.map(f => `\`${f}\``).join(", ")}`);
     }
-  }
-  parts.push("");
-
-  // Diff context (truncated if massive)
-  if (diff) {
-    const maxDiffLines = 500;
-    const diffLines = diff.split("\n");
-    parts.push("## Current Diff (main...HEAD)");
-    parts.push("```diff");
-    if (diffLines.length > maxDiffLines) {
-      parts.push(diffLines.slice(0, maxDiffLines).join("\n"));
-      parts.push(`... (truncated, ${diffLines.length - maxDiffLines} more lines)`);
-    } else {
-      parts.push(diff.trim());
+    if (task.requirements.length > 0) {
+      parts.push("  Requirements:");
+      for (const req of task.requirements) {
+        parts.push(`    - ${req}`);
+      }
     }
-    parts.push("```");
-    parts.push("");
   }
-
-  // Rules
-  parts.push("---");
-  parts.push("## Rules");
-  if (featureBranch) parts.push(`- **Feature branch**: \`${featureBranch}\``);
-  parts.push("- Commit each fix with: `fix(integration): <description>`");
-  parts.push("- Do NOT push to remote");
-  parts.push("- Do NOT modify test expectations — fix the implementation");
   parts.push("");
 
   return parts.join("\n");

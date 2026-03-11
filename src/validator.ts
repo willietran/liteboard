@@ -1,21 +1,17 @@
-import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as net from "node:net";
+import * as os from "node:os";
 import type {
   Task,
   ProjectType,
-  SmokeTestResult,
   IntegrationGateResult,
-  BuildValidationResult,
-  ValidationMetrics,
   Provider,
-  QAReport,
-  FixerResult,
+  GateStatus,
+  GatePhaseEntry,
 } from "./types.js";
-import { runBuildValidation } from "./build-validation.js";
-import { runFixerLoop, isCodeFixable } from "./fixer.js";
-import { runQAPhase, isPlaywrightMCPAvailable } from "./qa.js";
+import { buildGateAgentBrief, type GateAgentBriefOpts } from "./brief.js";
+import { renderGateStatus, HIDE_CURSOR, CLEAR_SCREEN, SHOW_CURSOR } from "./dashboard.js";
 
 // ─── Cleanup Set ─────────────────────────────────────────────────────────────
 
@@ -73,56 +69,7 @@ export function hashPort(branchName: string): number {
   return (Math.abs(hash) % 50000) + 10000;
 }
 
-// ─── Port Check ──────────────────────────────────────────────────────────────
-
-function tryConnect(port: number, host: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const conn = net.createConnection({ port, host });
-    conn.setTimeout(1000);
-    conn.on("connect", () => { conn.destroy(); resolve(true); });
-    conn.on("error", () => { conn.destroy(); resolve(false); });
-    conn.on("timeout", () => { conn.destroy(); resolve(false); });
-  });
-}
-
-function isPortReady(port: number): Promise<boolean> {
-  return Promise.all([
-    tryConnect(port, "127.0.0.1"),
-    tryConnect(port, "::1"),
-  ]).then(([v4, v6]) => v4 || v6);
-}
-
-async function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (await isPortReady(port)) return true;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  return false;
-}
-
-// ─── Process Cleanup ─────────────────────────────────────────────────────────
-
-function killProcess(proc: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (!proc.pid || proc.killed) {
-      resolve();
-      return;
-    }
-    proc.kill("SIGTERM");
-    const forceKillTimer = setTimeout(() => {
-      try {
-        proc.kill("SIGKILL");
-      } catch {}
-    }, 5000);
-    proc.on("close", () => {
-      clearTimeout(forceKillTimer);
-      resolve();
-    });
-  });
-}
-
-// ─── App Server Lifecycle ────────────────────────────────────────────────────
+// ─── Start Command ───────────────────────────────────────────────────────────
 
 export function getStartCommand(
   projectType: ProjectType,
@@ -140,146 +87,162 @@ export function getStartCommand(
   }
 }
 
-/** Start app server and wait for port readiness. Caller is responsible for stopping. */
-export async function startAppServer(
-  repoRoot: string,
-  projectType: ProjectType,
-  opts: { branch: string; verbose?: boolean },
-): Promise<{ process: ChildProcess; port: number; appUrl: string } | { error: string }> {
-  const basePort = hashPort(opts.branch);
-  let port = basePort;
+// ─── Playwright MCP Detection ────────────────────────────────────────────────
 
-  for (let attempt = 0; attempt < 5; attempt++) {
-    port = basePort + attempt;
-    const portInUse = await isPortReady(port);
-    if (!portInUse) break;
-    if (attempt === 4) {
-      return { error: `All ports ${basePort}-${port} in use` };
-    }
-  }
+/**
+ * Checks if Playwright MCP is available for a target project.
+ * Playwright is a built-in Claude Code plugin (available by default).
+ * It can be:
+ * - Disabled per-project via `disabledMcpServers` in `~/.claude.json`
+ * - Explicitly configured as an mcpServer at user or project level
+ */
+export function isPlaywrightMCPAvailable(repoRoot?: string): boolean {
+  const claudeJsonPath = path.join(os.homedir(), ".claude.json");
+  const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
 
-  const startCmd = getStartCommand(projectType, port);
-  if (opts.verbose) {
-    console.log(`  Running: ${startCmd.cmd} ${startCmd.args.join(" ")}`);
-  }
-
-  const appProcess = nodeSpawn(startCmd.cmd, startCmd.args, {
-    cwd: repoRoot,
-    stdio: "pipe",
-    env: { ...process.env, PORT: String(port) },
-  });
-  gateCleanupProcesses.add(appProcess);
-
-  const MAX_STDERR_BYTES = 8192;
-  let stderrBuf = "";
-  appProcess.stderr?.on("data", (chunk: Buffer) => {
-    if (stderrBuf.length < MAX_STDERR_BYTES) {
-      stderrBuf += chunk.toString().slice(0, MAX_STDERR_BYTES - stderrBuf.length);
-    }
-  });
-
-  let exited = false;
-  appProcess.on("close", () => { exited = true; });
-
-  const ready = await waitForPort(port, 60_000);
-  if (exited) {
-    gateCleanupProcesses.delete(appProcess);
-    return { error: `App process exited before port was ready${stderrBuf ? `\n${stderrBuf}` : ""}` };
-  }
-  if (!ready) {
-    gateCleanupProcesses.delete(appProcess);
-    await killProcess(appProcess);
-    return { error: `Port ${port} not ready within 60s${stderrBuf ? `\n${stderrBuf}` : ""}` };
-  }
-
-  return { process: appProcess, port, appUrl: `http://127.0.0.1:${port}` };
-}
-
-export async function stopAppServer(appProcess: ChildProcess): Promise<void> {
-  gateCleanupProcesses.delete(appProcess);
-  await killProcess(appProcess);
-}
-
-// ─── Smoke Test ──────────────────────────────────────────────────────────────
-
-export async function runSmokeTest(
-  repoRoot: string,
-  projectType: ProjectType,
-  appUrl?: string,
-): Promise<SmokeTestResult> {
-  if (projectType === "generic") {
-    return { success: true, projectType, error: "Smoke test skipped for generic project type" };
-  }
-
-  if (projectType === "library") {
+  // Check for explicit mcpServers.playwright in user-level config
+  for (const p of [claudeJsonPath, settingsPath]) {
+    if (!fs.existsSync(p)) continue;
     try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf-8"));
-      const entryPoint = pkg.main || (typeof pkg.exports === "string" ? pkg.exports : undefined);
-      if (entryPoint) {
-        const entryPath = path.join(repoRoot, entryPoint);
-        if (!fs.existsSync(entryPath)) {
-          return { success: false, projectType, error: `Entry point not found: ${entryPoint}` };
+      const config = JSON.parse(fs.readFileSync(p, "utf-8"));
+      if (config.mcpServers?.playwright) return true;
+    } catch {
+      // Skip malformed config
+    }
+  }
+
+  // Playwright is a built-in plugin — available unless explicitly disabled
+  // Check project-level config in ~/.claude.json (most specific path wins)
+  if (repoRoot && fs.existsSync(claudeJsonPath)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(claudeJsonPath, "utf-8"));
+      if (config.projects) {
+        const normalizedRoot = path.resolve(repoRoot);
+        // Find the most specific matching project path (longest match)
+        let bestMatch = "";
+        for (const projectPath of Object.keys(config.projects)) {
+          if (normalizedRoot.startsWith(projectPath) && projectPath.length > bestMatch.length) {
+            bestMatch = projectPath;
+          }
+        }
+        if (bestMatch) {
+          const pc = config.projects[bestMatch] as { disabledMcpServers?: string[]; mcpServers?: Record<string, unknown> };
+          if (pc.mcpServers?.playwright) return true;
+          if (pc.disabledMcpServers?.some((s: string) => s.includes("playwright"))) return false;
         }
       }
-    } catch (e) {
-      return { success: false, projectType, error: `Failed to check library entry: ${(e as Error).message}` };
-    }
-    return { success: true, projectType };
-  }
-
-  if (projectType === "cli") {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf-8"));
-      const binName = typeof pkg.bin === "string"
-        ? pkg.bin
-        : Object.values(pkg.bin as Record<string, string>)[0];
-      if (!binName) {
-        return { success: false, projectType, error: "No bin entry found" };
-      }
-      const binPath = path.join(repoRoot, binName);
-      if (!fs.existsSync(binPath)) {
-        return { success: false, projectType, error: `Bin file not found: ${binName}` };
-      }
-      return { success: true, projectType };
-    } catch (e) {
-      return { success: false, projectType, error: `CLI check failed: ${(e as Error).message}` };
+    } catch {
+      // Skip malformed config
     }
   }
 
-  // Web apps: verify HTTP response (server already started by caller)
-  if (!appUrl) {
-    return { success: false, projectType, error: "No app URL — server not started" };
-  }
-
-  try {
-    const response = await fetch(appUrl);
-    if (!response.ok && response.status >= 500) {
-      return { success: false, projectType, error: `HTTP check returned ${response.status}`, appUrl };
-    }
-  } catch (e) {
-    return { success: false, projectType, error: `HTTP check failed: ${(e as Error).message}`, appUrl };
-  }
-
-  return { success: true, projectType, appUrl };
+  // Built-in plugin, not disabled — available
+  return true;
 }
 
-// ─── Metrics Extraction ─────────────────────────────────────────────────────
+// ─── Gate Result Parsing ─────────────────────────────────────────────────────
 
-function extractMetrics(
-  buildResult: BuildValidationResult,
-  smokeResult?: SmokeTestResult,
-  qaReport?: QAReport,
-): ValidationMetrics {
-  return {
-    tscErrorCount: buildResult.tscErrorCount,
-    testFailCount: buildResult.testFailCount,
-    buildPasses: buildResult.success,
-    smokeTestPasses: smokeResult?.success ?? true,
-    qaFailures: qaReport?.totalFailed ?? 0,
-  };
+/**
+ * Parses gate agent output for [GATE:PASS] or [GATE:FAIL] markers.
+ * Scans from the end of output to find the last marker (agent may output
+ * intermediate markers during retries — last one wins).
+ * Works on raw JSONL bytes: markers appear inside JSON text fields,
+ * so simple includes() matching works.
+ */
+export function parseGateResult(output: string): IntegrationGateResult {
+  const lines = output.split("\n");
+
+  // Scan from end to find the last gate marker
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+
+    if (line.includes("[GATE:PASS]")) {
+      return { finalSuccess: true };
+    }
+
+    const failIdx = line.indexOf("[GATE:FAIL]");
+    if (failIdx !== -1) {
+      // Truncate at first " to strip JSON suffix (marker is embedded in JSONL text fields)
+      const afterMarker = line.slice(failIdx + "[GATE:FAIL]".length).replace(/"[\s\S]*$/, "").trim();
+      return {
+        finalSuccess: false,
+        failReason: afterMarker || undefined,
+      };
+    }
+  }
+
+  return { finalSuccess: false, failReason: "no result marker" };
+}
+
+// ─── Gate Stream Processor ───────────────────────────────────────────────────
+
+/**
+ * Processes a single JSONL line from the gate agent and updates status.
+ * Detects phase markers, tool usage, message turns, and fix attempts.
+ */
+export function processGateLine(line: string, status: GateStatus, lastMessageId: { value: string }): void {
+  // Phase start: [GATE:PHASE] <name>
+  const phaseMatch = line.match(/\[GATE:PHASE\]\s*([^"\\]+)/);
+  if (phaseMatch) {
+    const name = phaseMatch[1].trim();
+    for (const p of status.phases) {
+      if (p.name === name) {
+        p.status = "running";
+      } else if (p.status === "running") {
+        // Previous running phase implicitly passed
+        p.status = "passed";
+      }
+    }
+  }
+
+  // Phase passed: [GATE:OK] <name>
+  const okMatch = line.match(/\[GATE:OK\]\s*([^"\\]+)/);
+  if (okMatch) {
+    const name = okMatch[1].trim();
+    const phase = status.phases.find(p => p.name === name);
+    if (phase) phase.status = "passed";
+  }
+
+  // Phase failed: [GATE:WARN] <name>
+  const warnMatch = line.match(/\[GATE:WARN\]\s*([^"\\]+)/);
+  if (warnMatch) {
+    const name = warnMatch[1].trim();
+    const phase = status.phases.find(p => p.name === name);
+    if (phase) phase.status = "failed";
+  }
+
+  // Phase fixed: [GATE:FIXED] <name>
+  const fixedMatch = line.match(/\[GATE:FIXED\]\s*([^"\\]+)/);
+  if (fixedMatch) {
+    const name = fixedMatch[1].trim();
+    const phase = status.phases.find(p => p.name === name);
+    if (phase) phase.status = "fixed";
+  }
+
+  // Fix attempt: [GATE:FIXING] <N>
+  const fixingMatch = line.match(/\[GATE:FIXING\]\s*(\d+)/);
+  if (fixingMatch) {
+    status.fixAttempts = parseInt(fixingMatch[1], 10);
+  }
+
+  // Tool usage
+  const toolMatch = line.match(/"tool_name":\s*"([^"]+)"/);
+  if (toolMatch) {
+    status.currentTool = toolMatch[1];
+  }
+
+  // Turn counting: detect new assistant messages by unique ID
+  const msgIdMatch = line.match(/"id":\s*"(msg_[^"]+)"/);
+  if (msgIdMatch && msgIdMatch[1] !== lastMessageId.value) {
+    lastMessageId.value = msgIdMatch[1];
+    status.turnCount++;
+  }
 }
 
 // ─── Integration Gate Orchestrator ───────────────────────────────────────────
+
+/** Wall-clock safety timeout: 30 minutes. Defense-in-depth. */
+const GATE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface IntegrationGateOpts {
   branch: string;
@@ -300,178 +263,123 @@ export async function runIntegrationGate(
   tasks: Task[],
   opts: IntegrationGateOpts,
 ): Promise<IntegrationGateResult> {
-  const phases: string[] = [];
-  let appProcess: ChildProcess | undefined;
-  let gateStatus = "starting";
-  const gateStart = Date.now();
-  const heartbeat = setInterval(() => {
-    const elapsed = Math.round((Date.now() - gateStart) / 1000);
-    console.log(`  [gate ${elapsed}s] ${gateStatus}`);
-  }, 5000);
+  // Build gate agent brief
+  const projectType = detectProjectType(repoRoot);
+  const port = hashPort(opts.branch);
+  const startCommand = getStartCommand(projectType, port);
+  const playwrightAvailable = isPlaywrightMCPAvailable(repoRoot);
+
+  const briefOpts: GateAgentBriefOpts = {
+    projectType,
+    port,
+    startCommand,
+    skipSmoke: opts.skipSmoke,
+    skipQA: opts.skipQA,
+    noFixer: opts.noFixer,
+    fixerPatience: opts.fixerPatience,
+    playwrightAvailable,
+    designPath: opts.designPath,
+    manifestPath: opts.manifestPath,
+  };
+
+  const brief = buildGateAgentBrief(tasks, briefOpts);
+
+  // Ensure logs directory exists
+  const logsDir = path.join(opts.projectDir, "logs");
+  if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+  const logFile = path.join(logsDir, "gate-agent.jsonl");
+  const logStream = fs.createWriteStream(logFile, { flags: "w" });
+
+  // Initialize gate status for dashboard
+  const phases: GatePhaseEntry[] = [
+    { name: "Build Validation", status: "pending" },
+    { name: "Smoke Test", status: opts.skipSmoke ? "skipped" : "pending" },
+    { name: "QA", status: (opts.skipQA || !playwrightAvailable) ? "skipped" : "pending" },
+  ];
+
+  const status: GateStatus = {
+    startedAt: Date.now(),
+    phases,
+    currentTool: "",
+    turnCount: 0,
+    bytesReceived: 0,
+    fixAttempts: 0,
+    maxFixAttempts: opts.noFixer ? 0 : opts.fixerPatience,
+    taskCount: tasks.length,
+    logPath: logFile,
+  };
+
+  // Take over screen for gate dashboard (HIDE_CURSOR for defense-in-depth)
+  process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
+  renderGateStatus(status);
+  const renderInterval = setInterval(() => renderGateStatus(status), 1000);
 
   try {
-    // Phase 1: Clean Build Validation
-    gateStatus = "Phase 1: Build Validation";
-    console.log("\n\x1b[1m[Integration Gate] Phase 1: Clean Build Validation\x1b[0m");
-    const buildResult = runBuildValidation(repoRoot, { cleanInstall: true, verbose: opts.verbose });
-    phases.push("build");
+    const child = opts.provider.spawn({
+      prompt: brief,
+      model: opts.model,
+      cwd: repoRoot,
+      verbose: opts.verbose,
+    });
+    gateCleanupProcesses.add(child);
 
-    if (buildResult.success) {
-      gateStatus = "Phase 1: Build Validation — passed";
-      console.log("  \x1b[32mBuild validation passed\x1b[0m");
-    } else {
-      gateStatus = `Phase 1: Build Validation — failed at ${buildResult.failedPhase}`;
-      console.log(`  \x1b[31mBuild validation failed at: ${buildResult.failedPhase}\x1b[0m`);
-      if (buildResult.tscErrorCount > 0) {
-        console.log(`  TypeScript errors: ${buildResult.tscErrorCount}`);
-      }
-    }
+    // Wall-clock safety timeout
+    const safetyTimer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }, GATE_TIMEOUT_MS);
 
-    // Phase 2: Smoke Test
-    let smokeResult: SmokeTestResult | undefined;
-    if (!opts.skipSmoke) {
-      console.log("\n\x1b[1m[Integration Gate] Phase 2: Smoke Test\x1b[0m");
-      const projectType = detectProjectType(repoRoot);
-      console.log(`  Detected project type: ${projectType}`);
+    // Stream output, keep tail for result parsing
+    const OUTPUT_TAIL_BYTES = 32_768;
+    let output = "";
+    let lineBuffer = "";
+    const lastMessageId = { value: "" };
 
-      // For web apps, start the server (kept alive for QA phase)
-      const isWebApp = projectType === "nextjs" || projectType === "vite" || projectType === "express";
-      let appUrl: string | undefined;
-
-      if (isWebApp && buildResult.success) {
-        const basePort = hashPort(opts.branch);
-        gateStatus = `Phase 2: Smoke Test — starting server on port ${basePort}`;
-        console.log("  Starting app server...");
-        const serverResult = await startAppServer(repoRoot, projectType, { branch: opts.branch, verbose: opts.verbose });
-        if ("error" in serverResult) {
-          gateStatus = "Phase 2: Smoke Test — server failed";
-          console.log(`  \x1b[31mServer failed: ${serverResult.error}\x1b[0m`);
-          smokeResult = { success: false, projectType, error: serverResult.error };
-        } else {
-          appProcess = serverResult.process;
-          appUrl = serverResult.appUrl;
-          gateStatus = "Phase 2: Smoke Test — server ready, HTTP check";
-          console.log(`  Server ready at ${appUrl}, running HTTP check...`);
-          smokeResult = await runSmokeTest(repoRoot, projectType, appUrl);
+    const exitCode = await new Promise<number | null>((resolve) => {
+      child.stdout?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        status.bytesReceived += chunk.length;
+        output += text;
+        if (output.length > OUTPUT_TAIL_BYTES * 2) {
+          output = output.slice(-OUTPUT_TAIL_BYTES);
         }
-      } else {
-        gateStatus = "Phase 2: Smoke Test";
-        // Non-web project types (library, cli, generic) — no server needed
-        smokeResult = await runSmokeTest(repoRoot, projectType);
-      }
+        logStream.write(chunk);
 
-      phases.push("smoke");
-
-      if (smokeResult.success) {
-        gateStatus = "Phase 2: Smoke Test — passed";
-        console.log("  \x1b[32mSmoke test passed\x1b[0m");
-      } else {
-        gateStatus = `Phase 2: Smoke Test — failed`;
-        console.log(`  \x1b[31mSmoke test failed: ${smokeResult.error}\x1b[0m`);
-      }
-    }
-
-    // Phase 3: Playwright QA (web apps only, if MCP available, server still running)
-    let qaReport: QAReport | undefined;
-    if (!opts.skipQA && smokeResult?.appUrl && appProcess && isPlaywrightMCPAvailable(repoRoot)) {
-      gateStatus = "Phase 3: QA — running Playwright checks";
-      console.log("\n\x1b[1m[Integration Gate] Phase 3: Playwright QA\x1b[0m");
-      qaReport = await runQAPhase(repoRoot, tasks, opts.provider, opts.model, smokeResult.appUrl, {
-        verbose: opts.verbose,
-        projectDir: opts.projectDir,
+        // Process each complete line for status updates
+        lineBuffer += text;
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          processGateLine(line, status, lastMessageId);
+        }
       });
-      phases.push("qa");
+      child.stderr?.on("data", (chunk: Buffer) => {
+        logStream.write(`[stderr] ${chunk.toString()}\n`);
+      });
+      child.on("close", (code) => {
+        // Flush remaining line buffer
+        if (lineBuffer) {
+          processGateLine(lineBuffer, status, lastMessageId);
+        }
+        logStream.end();
+        gateCleanupProcesses.delete(child);
+        clearTimeout(safetyTimer);
+        resolve(code);
+      });
+    });
 
-      if (qaReport.totalFailed === 0) {
-        gateStatus = `Phase 3: QA — ${qaReport.totalPassed}/${qaReport.totalPassed} features verified`;
-        console.log(`  \x1b[32mQA passed: ${qaReport.totalPassed} features verified\x1b[0m`);
-      } else {
-        gateStatus = `Phase 3: QA — ${qaReport.totalPassed}/${qaReport.totalPassed + qaReport.totalFailed} features verified`;
-        console.log(`  \x1b[31mQA: ${qaReport.totalFailed} failures, ${qaReport.totalPassed} passed\x1b[0m`);
-      }
-    } else if (!opts.skipQA) {
-      if (!smokeResult?.appUrl || !appProcess) {
-        console.log("\n  \x1b[33mSkipping QA: no running app server\x1b[0m");
-      } else {
-        console.log("\n  \x1b[33mSkipping QA: Playwright MCP not available\x1b[0m");
-      }
+    // Parse result from agent output
+    const result = parseGateResult(output);
+
+    // If agent crashed without a marker, include exit code in reason
+    if (!result.finalSuccess && result.failReason === "no result marker" && exitCode !== 0) {
+      result.failReason = `agent exited with code ${exitCode}`;
     }
 
-    // Stop app server after QA — no longer needed
-    if (appProcess) {
-      await stopAppServer(appProcess);
-      appProcess = undefined;
-    }
-
-    // Check if any phase failed
-    const anyFailed = !buildResult.success ||
-      (smokeResult && !smokeResult.success) ||
-      (qaReport && qaReport.totalFailed > 0);
-
-    // Phase 4: Fixer Agent (if any failures and fixer is enabled)
-    let fixerResult: FixerResult | undefined;
-    if (anyFailed && !opts.noFixer) {
-      const codeFixable = isCodeFixable(buildResult, smokeResult, qaReport);
-
-      if (!codeFixable) {
-        console.log("\n\x1b[33m[Integration Gate] Skipping fixer — failures are infrastructure-only (not code-fixable)\x1b[0m");
-        if (smokeResult && !smokeResult.success) {
-          console.log(`  Smoke test error: ${smokeResult.error}`);
-        }
-      } else {
-        console.log("\n\x1b[1m[Integration Gate] Phase 4: Fixer Agent\x1b[0m");
-        // Summarize what failed so the user knows what the fixer is working on
-        if (!buildResult.success) {
-          console.log(`  \x1b[33mBuild failed at: ${buildResult.failedPhase}${buildResult.tscErrorCount ? ` (${buildResult.tscErrorCount} TS errors)` : ""}${buildResult.testFailCount ? ` (${buildResult.testFailCount} test failures)` : ""}\x1b[0m`);
-        }
-        if (smokeResult && !smokeResult.success) {
-          console.log(`  \x1b[33mSmoke test failed: ${smokeResult.error}\x1b[0m`);
-        }
-        if (qaReport && qaReport.totalFailed > 0) {
-          console.log(`  \x1b[33mQA: ${qaReport.totalFailed} feature(s) failed\x1b[0m`);
-        }
-        gateStatus = "Phase 4: Fixer — starting";
-        console.log("  Spawning fixer agent to resolve...");
-        const initialMetrics = extractMetrics(buildResult, smokeResult, qaReport);
-        const errorContext = { buildResult, smokeResult, qaReport };
-
-        fixerResult = await runFixerLoop(repoRoot, opts.branch, tasks, initialMetrics, errorContext, opts.provider, opts.model, {
-          fixerPatience: opts.fixerPatience,
-          verbose: opts.verbose,
-          projectDir: opts.projectDir,
-          skipSmoke: opts.skipSmoke,
-          skipQA: opts.skipQA,
-          designPath: opts.designPath,
-          manifestPath: opts.manifestPath,
-          onStatus: (status) => { gateStatus = `Phase 4: Fixer — ${status}`; },
-        });
-        phases.push("fixer");
-
-        if (fixerResult.converged) {
-          console.log(`  \x1b[32mFixer converged after ${fixerResult.rounds} round(s)\x1b[0m`);
-        } else {
-          console.log(`  \x1b[31mFixer did not converge after ${fixerResult.rounds} round(s)\x1b[0m`);
-        }
-      }
-    }
-
-    const finalSuccess = fixerResult
-      ? fixerResult.converged
-      : !anyFailed;
-
-    return {
-      finalSuccess,
-      buildResult,
-      smokeResult,
-      qaReport,
-      fixerResult,
-      phases,
-    };
+    return result;
   } finally {
-    clearInterval(heartbeat);
-    // Ensure app server is always cleaned up
-    if (appProcess) {
-      await stopAppServer(appProcess);
-    }
+    clearInterval(renderInterval);
+    process.stdout.write(CLEAR_SCREEN + SHOW_CURSOR);
   }
 }

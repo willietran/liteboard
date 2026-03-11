@@ -18,8 +18,8 @@ vi.mock("../src/memory.js", () => ({
 
 import { readFileSync } from "node:fs";
 import { readMemorySnapshot } from "../src/memory.js";
-import { buildBrief, formatFixerErrors } from "../src/brief.js";
-import type { Task, FixerErrorContext } from "../src/types.js";
+import { buildBrief, buildGateAgentBrief, type GateAgentBriefOpts } from "../src/brief.js";
+import type { Task } from "../src/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -30,6 +30,7 @@ const STUB_COMMANDS: Record<string, string> = {
   "receiving-code-review.md": "# Receiving Code Review\nProcess feedback methodically.",
   "code-reviewer.md": "# Code Reviewer\nEvaluate code against criteria.",
   "quality-standards.md": "# Quality Standards\nEvery task must satisfy these standards.",
+  "gate-agent.md": "# Integration Gate Agent\nYou are the integration gate agent.",
 };
 
 function stubReadFileSync() {
@@ -271,119 +272,89 @@ describe("buildBrief", () => {
   });
 });
 
-// ─── formatFixerErrors ──────────────────────────────────────────────────────
+// ─── buildGateAgentBrief ─────────────────────────────────────────────────────
 
-describe("formatFixerErrors", () => {
-  it("formats passing build phase", () => {
-    const ctx: FixerErrorContext = {
-      buildResult: {
-        success: true,
-        failedPhase: "none",
-        tscErrorCount: 0,
-        testFailCount: 0,
-        testPassCount: 5,
-      },
-    };
-    const output = formatFixerErrors(ctx);
-    expect(output).toContain("### Build Phase: PASSED");
+describe("buildGateAgentBrief", () => {
+  const defaultOpts: GateAgentBriefOpts = {
+    projectType: "nextjs",
+    port: 12345,
+    startCommand: { cmd: "npx", args: ["next", "start", "-p", "12345"] },
+    skipSmoke: false,
+    skipQA: false,
+    noFixer: false,
+    fixerPatience: 3,
+    playwrightAvailable: true,
+    designPath: "/project/design.md",
+    manifestPath: "/project/manifest.md",
+  };
+
+  it("includes gate-agent.md content", () => {
+    const tasks = [makeTask()];
+    const brief = buildGateAgentBrief(tasks, defaultOpts);
+    expect(brief).toContain("# Integration Gate Agent");
+    expect(brief).toContain("You are the integration gate agent.");
   });
 
-  it("formats failing build with tsc errors and stderr", () => {
-    const ctx: FixerErrorContext = {
-      buildResult: {
-        success: false,
-        failedPhase: "typecheck",
-        tscErrorCount: 3,
-        testFailCount: 0,
-        testPassCount: 0,
-        stderr: "src/foo.ts(1,1): error TS2304: cannot find name",
-      },
-    };
-    const output = formatFixerErrors(ctx);
-    expect(output).toContain("### Build Phase: FAILED at `typecheck`");
-    expect(output).toContain("TypeScript errors: 3");
-    expect(output).toContain("error TS2304");
+  it("includes project type, port, and start command", () => {
+    const tasks = [makeTask()];
+    const brief = buildGateAgentBrief(tasks, defaultOpts);
+    expect(brief).toContain("nextjs");
+    expect(brief).toContain("12345");
+    expect(brief).toContain("npx next start -p 12345");
   });
 
-  it("formats failing build with test failures", () => {
-    const ctx: FixerErrorContext = {
-      buildResult: {
-        success: false,
-        failedPhase: "test",
-        tscErrorCount: 0,
-        testFailCount: 2,
-        testPassCount: 10,
-        stderr: "FAIL src/foo.test.ts",
-      },
-    };
-    const output = formatFixerErrors(ctx);
-    expect(output).toContain("Test failures: 2 (10 passed)");
+  it("includes skip flags when set", () => {
+    const tasks = [makeTask()];
+    const brief = buildGateAgentBrief(tasks, {
+      ...defaultOpts,
+      skipSmoke: true,
+      skipQA: true,
+      noFixer: true,
+    });
+    expect(brief).toContain("SKIP_SMOKE");
+    expect(brief).toContain("SKIP_QA");
+    expect(brief).toContain("NO_FIXER");
   });
 
-  it("formats failing smoke test with error details", () => {
-    const ctx: FixerErrorContext = {
-      buildResult: {
-        success: true,
-        failedPhase: "none",
-        tscErrorCount: 0,
-        testFailCount: 0,
-        testPassCount: 5,
-      },
-      smokeResult: {
-        success: false,
-        projectType: "vite",
-        error: "HTTP check returned 500",
-        appUrl: "http://127.0.0.1:12345",
-      },
-    };
-    const output = formatFixerErrors(ctx);
-    expect(output).toContain("### Smoke Test: FAILED");
-    expect(output).toContain("HTTP check returned 500");
-    expect(output).toContain("http://127.0.0.1:12345");
+  it("omits skip flags when not set", () => {
+    const tasks = [makeTask()];
+    const brief = buildGateAgentBrief(tasks, defaultOpts);
+    expect(brief).not.toContain("SKIP_SMOKE");
+    expect(brief).not.toContain("SKIP_QA");
+    expect(brief).not.toContain("NO_FIXER");
   });
 
-  it("formats QA failures with feature names", () => {
-    const ctx: FixerErrorContext = {
-      buildResult: {
-        success: true,
-        failedPhase: "none",
-        tscErrorCount: 0,
-        testFailCount: 0,
-        testPassCount: 5,
-      },
-      qaReport: {
-        features: [
-          { name: "Login", passed: true },
-          { name: "Task creation", passed: false, error: "Submit button broken" },
-          { name: "Settings", passed: false, error: "Page not found" },
-        ],
-        totalPassed: 1,
-        totalFailed: 2,
-      },
-    };
-    const output = formatFixerErrors(ctx);
-    expect(output).toContain("### QA Phase: 2 of 3 features failed");
-    expect(output).toContain("[QA:FAIL] Task creation: Submit button broken");
-    expect(output).toContain("[QA:FAIL] Settings: Page not found");
-    expect(output).not.toContain("Login");
+  it("includes fixer patience", () => {
+    const tasks = [makeTask()];
+    const brief = buildGateAgentBrief(tasks, { ...defaultOpts, fixerPatience: 5 });
+    expect(brief).toContain("MAX_FIX_ATTEMPTS:** 5");
   });
 
-  it("formats all-passing QA", () => {
-    const ctx: FixerErrorContext = {
-      buildResult: {
-        success: true,
-        failedPhase: "none",
-        tscErrorCount: 0,
-        testFailCount: 0,
-        testPassCount: 5,
-      },
-      qaReport: {
-        features: [{ name: "Login", passed: true }],
-        totalPassed: 1,
-        totalFailed: 0,
-      },
-    };
-    const output = formatFixerErrors(ctx);
-    expect(output).toContain("### QA Phase: PASSED (1 features verified)");
+  it("includes Playwright unavailable note when not available", () => {
+    const tasks = [makeTask()];
+    const brief = buildGateAgentBrief(tasks, { ...defaultOpts, playwrightAvailable: false });
+    expect(brief).toContain("Playwright MCP is not available");
+  });
+
+  it("includes reference documents", () => {
+    const tasks = [makeTask()];
+    const brief = buildGateAgentBrief(tasks, defaultOpts);
+    expect(brief).toContain("/project/design.md");
+    expect(brief).toContain("/project/manifest.md");
+  });
+
+  it("includes task manifest with requirements", () => {
+    const tasks = [makeTask({ id: 1, title: "Add login", requirements: ["User can sign up", "User can log in"] })];
+    const brief = buildGateAgentBrief(tasks, defaultOpts);
+    expect(brief).toContain("Task 1: Add login");
+    expect(brief).toContain("User can sign up");
+    expect(brief).toContain("User can log in");
+  });
+
+  it("includes task creates and modifies", () => {
+    const tasks = [makeTask({ creates: ["src/auth.ts"], modifies: ["src/app.ts"] })];
+    const brief = buildGateAgentBrief(tasks, defaultOpts);
+    expect(brief).toContain("`src/auth.ts`");
+    expect(brief).toContain("`src/app.ts`");
   });
 });

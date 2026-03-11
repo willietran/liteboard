@@ -449,25 +449,25 @@ async function main(): Promise<void> {
     await Promise.allSettled(activePromises.values());
   }
 
-  // Stop dashboard before integration gate (gate can take 10+ minutes)
+  // Stop task dashboard
   clearInterval(dashboardInterval);
-  process.stdout.write(SHOW_CURSOR);
 
-  // Final summary
   const done = filteredTasks.filter(t => t.status === "done").length;
   const failed = filteredTasks.filter(t => t.status === "failed").length;
 
-  console.log("");
-  console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
-  console.log(`  \x1b[32m${done} done\x1b[0m${failed > 0 ? `, \x1b[31m${failed} failed\x1b[0m` : ""} of ${filteredTasks.length} tasks`);
-
   if (failed > 0) {
+    // No gate — show cursor and print failure summary
+    process.stdout.write(SHOW_CURSOR);
+    console.log("");
+    console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
+    console.log(`  \x1b[32m${done} done\x1b[0m, \x1b[31m${failed} failed\x1b[0m of ${filteredTasks.length} tasks`);
     console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
     process.exit(1);
   }
 
   // Integration gate: only run if ALL tasks succeeded
   if (done === filteredTasks.length && !args.skipValidation) {
+    // Cursor stays hidden — gate dashboard takes over the screen
     const gateResult = await runIntegrationGate(process.cwd(), filteredTasks, {
       branch: args.branch,
       provider,
@@ -482,15 +482,28 @@ async function main(): Promise<void> {
       manifestPath,
     });
 
+    // Gate dashboard done — cursor restored by gate, print final summary
+    console.log("");
+    console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
+    console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
+
     if (gateResult.finalSuccess) {
-      console.log(`\n  \x1b[32mIntegration gate passed.\x1b[0m`);
+      console.log(`  \x1b[32mIntegration gate passed.\x1b[0m`);
       console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
     } else {
-      console.log(`\n  \x1b[31mIntegration gate failed.\x1b[0m`);
+      console.log(`  \x1b[31mIntegration gate failed.\x1b[0m`);
+      if (gateResult.failReason) {
+        console.log(`  Reason: ${gateResult.failReason}`);
+      }
       console.log(`  Check logs at ${args.projectPath}/logs/ for details.`);
       process.exit(2);
     }
-  } else if (done === filteredTasks.length) {
+  } else {
+    // No gate — show cursor and print summary
+    process.stdout.write(SHOW_CURSOR);
+    console.log("");
+    console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
+    console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
     console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
   }
 

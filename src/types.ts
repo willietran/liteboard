@@ -128,62 +128,39 @@ export interface BuildValidationResult {
   failedPhase: "install" | "typecheck" | "build" | "test" | "none";
   error?: string;
   stderr?: string;
+  /** True when the failing phase was killed by execFileSync timeout, not a code error. */
+  timedOut?: boolean;
   tscErrorCount: number;
   testFailCount: number;
   testPassCount: number;
-}
-
-// ─── Smoke Test ──────────────────────────────────────────────────────────
-
-export interface SmokeTestResult {
-  success: boolean;
-  projectType: ProjectType;
-  error?: string;
-  appUrl?: string;
-}
-
-// ─── Validation Metrics ──────────────────────────────────────────────────
-
-export interface ValidationMetrics {
-  tscErrorCount: number;
-  testFailCount: number;
-  buildPasses: boolean;
-  smokeTestPasses: boolean;
-  qaFailures: number;
-}
-
-// ─── QA Report ───────────────────────────────────────────────────────────
-
-export interface QAReport {
-  features: Array<{ name: string; passed: boolean; error?: string }>;
-  totalPassed: number;
-  totalFailed: number;
 }
 
 // ─── Integration Gate ────────────────────────────────────────────────────
 
 export interface IntegrationGateResult {
   finalSuccess: boolean;
-  buildResult: BuildValidationResult;
-  smokeResult?: SmokeTestResult;
-  qaReport?: QAReport;
-  fixerResult?: FixerResult;
-  phases: string[];
+  failReason?: string;
 }
 
-// ─── Fixer ───────────────────────────────────────────────────────────────
+// ─── Gate Dashboard ─────────────────────────────────────────────────────
 
-export interface FixerErrorContext {
-  buildResult: BuildValidationResult;
-  smokeResult?: SmokeTestResult;
-  qaReport?: QAReport;
+export type GatePhaseStatus = "pending" | "running" | "passed" | "failed" | "fixed" | "skipped";
+
+export interface GatePhaseEntry {
+  name: string;
+  status: GatePhaseStatus;
 }
 
-export interface FixerResult {
-  rounds: number;
-  converged: boolean;
-  finalMetrics: ValidationMetrics;
-  error?: string;
+export interface GateStatus {
+  startedAt: number;
+  phases: GatePhaseEntry[];
+  currentTool: string;
+  turnCount: number;
+  bytesReceived: number;
+  fixAttempts: number;
+  maxFixAttempts: number;
+  taskCount: number;
+  logPath: string;
 }
 
 // ─── Dependency Layer ─────────────────────────────────────────────────────

@@ -121,6 +121,45 @@ describe("runBuildValidation — install failure", () => {
     expect(result.failedPhase).toBe("install");
     expect(result.stderr).toContain("ERESOLVE");
   });
+
+  it("reports timeout when install is killed by timeout", () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "npm" && (a[0] === "install" || a[0] === "ci")) {
+        throw Object.assign(new Error("SIGTERM"), {
+          killed: true,
+          signal: "SIGTERM",
+          stderr: "",
+        });
+      }
+      return "";
+    });
+
+    const result = runBuildValidation("/repo", { cleanInstall: true });
+
+    expect(result.success).toBe(false);
+    expect(result.failedPhase).toBe("install");
+    expect(result.timedOut).toBe(true);
+    expect(result.error).toContain("timed out");
+  });
+
+  it("does not set timedOut for non-timeout install errors", () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "npm" && (a[0] === "install" || a[0] === "ci")) {
+        throw Object.assign(new Error("ERESOLVE"), {
+          stderr: "npm ERR! code ERESOLVE",
+        });
+      }
+      return "";
+    });
+
+    const result = runBuildValidation("/repo", { cleanInstall: false });
+
+    expect(result.success).toBe(false);
+    expect(result.failedPhase).toBe("install");
+    expect(result.timedOut).toBeFalsy();
+  });
 });
 
 // ─── Typecheck failure ───────────────────────────────────────────────────────

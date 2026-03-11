@@ -7,6 +7,11 @@ import { getErrorMessage, getErrorStderr } from "./errors.js";
 
 export const NPM_TIMEOUT_MS = 120_000;
 
+/** Returns true if an execFileSync error was caused by the timeout killing the process. */
+function isTimeoutKill(e: unknown): boolean {
+  return (e as { killed?: boolean }).killed === true;
+}
+
 // ─── Build Validation ────────────────────────────────────────────────────────
 
 export interface BuildValidationOpts {
@@ -51,12 +56,16 @@ export function runBuildValidation(
     });
   } catch (e: unknown) {
     const stderr = getErrorStderr(e);
-    log(`\x1b[31mInstall failed\x1b[0m`);
+    const timedOut = isTimeoutKill(e);
+    log(`\x1b[31mInstall ${timedOut ? "timed out" : "failed"}\x1b[0m`);
     if (stderr) logStderrPreview(log, stderr);
     return {
       success: false,
       failedPhase: "install",
-      error: getErrorMessage(e),
+      timedOut,
+      error: timedOut
+        ? `Install timed out after ${timeout}ms`
+        : getErrorMessage(e),
       stderr,
       tscErrorCount: 0,
       testFailCount: 0,
@@ -76,15 +85,19 @@ export function runBuildValidation(
     });
   } catch (e: unknown) {
     const stderr = getErrorStderr(e);
-    tscErrorCount = (stderr.match(/error TS\d+/g) || []).length;
-    log(`\x1b[31mTypecheck failed (${tscErrorCount || 1} error(s))\x1b[0m`);
+    const timedOut = isTimeoutKill(e);
+    tscErrorCount = timedOut ? 0 : (stderr.match(/error TS\d+/g) || []).length;
+    log(`\x1b[31mTypecheck ${timedOut ? "timed out" : `failed (${tscErrorCount || 1} error(s))`}\x1b[0m`);
     if (stderr) logStderrPreview(log, stderr);
     return {
       success: false,
       failedPhase: "typecheck",
-      error: getErrorMessage(e),
+      timedOut,
+      error: timedOut
+        ? `Typecheck timed out after ${timeout}ms`
+        : getErrorMessage(e),
       stderr,
-      tscErrorCount: tscErrorCount || 1,
+      tscErrorCount: timedOut ? 0 : (tscErrorCount || 1),
       testFailCount: 0,
       testPassCount: 0,
     };
@@ -101,12 +114,16 @@ export function runBuildValidation(
     });
   } catch (e: unknown) {
     const stderr = getErrorStderr(e);
-    log(`\x1b[31mBuild failed\x1b[0m`);
+    const timedOut = isTimeoutKill(e);
+    log(`\x1b[31mBuild ${timedOut ? "timed out" : "failed"}\x1b[0m`);
     if (stderr) logStderrPreview(log, stderr);
     return {
       success: false,
       failedPhase: "build",
-      error: getErrorMessage(e),
+      timedOut,
+      error: timedOut
+        ? `Build timed out after ${timeout}ms`
+        : getErrorMessage(e),
       stderr,
       tscErrorCount: 0,
       testFailCount: 0,
@@ -144,16 +161,20 @@ export function runBuildValidation(
       testFailCount = counts.failed;
     } catch (e: unknown) {
       const stderr = getErrorStderr(e);
+      const timedOut = isTimeoutKill(e);
       const stdout = (e as { stdout?: string }).stdout || "";
-      const counts = parseTestCounts(stdout + "\n" + stderr);
-      testFailCount = counts.failed || 1;
+      const counts = timedOut ? { failed: 0, passed: 0 } : parseTestCounts(stdout + "\n" + stderr);
+      testFailCount = timedOut ? 0 : (counts.failed || 1);
       testPassCount = counts.passed;
-      log(`\x1b[31mTests failed (${testFailCount} failure(s), ${testPassCount} passed)\x1b[0m`);
+      log(`\x1b[31mTests ${timedOut ? "timed out" : `failed (${testFailCount} failure(s), ${testPassCount} passed)`}\x1b[0m`);
       if (stderr) logStderrPreview(log, stderr);
       return {
         success: false,
         failedPhase: "test",
-        error: getErrorMessage(e),
+        timedOut,
+        error: timedOut
+          ? `Tests timed out after ${timeout}ms`
+          : getErrorMessage(e),
         stderr,
         tscErrorCount: 0,
         testFailCount,
