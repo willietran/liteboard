@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Task } from "./types.js";
+import type { Task, ModelConfig, Provider } from "./types.js";
 import { readMemorySnapshot } from "./memory.js";
 import { artifactsDir } from "./paths.js";
 
@@ -46,12 +46,14 @@ export function buildBrief(
   designPath: string,
   manifestPath: string,
   featureBranch: string,
+  models?: ModelConfig,
+  provider?: Provider,
 ): string {
   const slug = path.basename(projectDir);
 
   // QA tasks get a specialized brief
   if (task.type === "qa") {
-    return buildQABrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, slug);
+    return buildQABrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, slug, models, provider);
   }
 
   const parts: string[] = [];
@@ -60,7 +62,17 @@ export function buildBrief(
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
 
-  // 1.5. Quality standards
+  // 1.5. Sub-agent model preferences
+  if (models && provider) {
+    parts.push("## Sub-Agent Models");
+    parts.push("When spawning sub-agents via the Agent tool, use these model settings:");
+    parts.push(`- Explore sub-agents: model: "${provider.subagentModelHint(models.explore.model)}"`);
+    parts.push(`- Plan Review sub-agents: model: "${provider.subagentModelHint(models.planReview.model)}"`);
+    parts.push(`- Code Review sub-agents: model: "${provider.subagentModelHint(models.codeReview.model)}"`);
+    parts.push("");
+  }
+
+  // 1.75. Quality standards
   parts.push(readCommand("quality-standards.md"));
   parts.push("");
 
@@ -165,12 +177,23 @@ function buildQABrief(
   manifestPath: string,
   featureBranch: string,
   slug: string,
+  models?: ModelConfig,
+  provider?: Provider,
 ): string {
   const parts: string[] = [];
 
   // 1. Agent orientation + quality standards (same as impl tasks)
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
+
+  // 1.5. Sub-agent model preferences
+  if (models && provider) {
+    parts.push("## Sub-Agent Models");
+    parts.push("When spawning sub-agents via the Agent tool, use these model settings:");
+    parts.push(`- Fixer sub-agents: model: "${provider.subagentModelHint(models.qaFixer.model)}"`);
+    parts.push("");
+  }
+
   parts.push(readCommand("quality-standards.md"));
   parts.push("");
 

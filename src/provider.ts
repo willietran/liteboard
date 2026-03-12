@@ -75,6 +75,14 @@ export class ClaudeCodeProvider implements Provider {
 
   private _singleParser?: StreamParser;
 
+  // Claude-specific: maps full model IDs to Agent tool shorthand.
+  // Future providers (OpenAI, Ollama) will implement their own version.
+  subagentModelHint(fullModel: string): string {
+    if (fullModel.includes("opus")) return "opus";
+    if (fullModel.includes("haiku")) return "haiku";
+    return "sonnet";
+  }
+
   async healthCheck(): Promise<boolean> {
     try {
       execFileSync("which", ["claude"]);

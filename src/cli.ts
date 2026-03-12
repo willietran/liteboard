@@ -2,7 +2,8 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task, CLIArgs } from "./types.js";
+import type { Task, CLIArgs, ModelConfig } from "./types.js";
+import { defaultModelConfig } from "./types.js";
 import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
@@ -57,7 +58,7 @@ Options:
   // First positional arg after "run" is the project path
   const positional: string[] = [];
   let concurrency = 1;
-  let model = "claude-opus-4-6";
+  const models = defaultModelConfig();
   let branch = "";
   let taskFilter: number[] | null = null;
   let dryRun = false;
@@ -69,7 +70,7 @@ Options:
     if (arg.startsWith("--concurrency=")) {
       concurrency = Math.max(1, Math.min(5, parseInt(arg.slice("--concurrency=".length), 10)));
     } else if (arg.startsWith("--model=")) {
-      model = arg.slice("--model=".length);
+      models.implementation = { ...models.implementation, model: arg.slice("--model=".length) };
     } else if (arg.startsWith("--branch=")) {
       branch = arg.slice("--branch=".length);
     } else if (arg.startsWith("--tasks=")) {
@@ -102,7 +103,7 @@ Options:
     branch = `liteboard/${slug}`;
   }
 
-  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose, noTui };
+  return { projectPath, concurrency, models, branch, taskFilter, dryRun, verbose, noTui };
 }
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
@@ -238,8 +239,15 @@ async function main(): Promise<void> {
       if (config.branch && !process.argv.some(a => a.startsWith("--branch"))) {
         args.branch = config.branch;
       }
-      if (config.models?.implementation?.model && !process.argv.some(a => a.startsWith("--model"))) {
-        args.model = config.models.implementation.model;
+      // Merge model slots from config.json (CLI --model flag takes priority for implementation)
+      if (config.models) {
+        const cliHasModel = process.argv.some(a => a.startsWith("--model"));
+        for (const slot of ["implementation", "qa", "explore", "planReview", "codeReview", "qaFixer"] as const) {
+          if (config.models[slot]?.provider || config.models[slot]?.model) {
+            if (slot === "implementation" && cliHasModel) continue;
+            args.models[slot] = { ...args.models[slot], ...config.models[slot] };
+          }
+        }
       }
     } catch {
       log("\x1b[33mWarning: Could not parse config.json\x1b[0m");
@@ -346,8 +354,9 @@ async function main(): Promise<void> {
       wp = createWorktree(slug, task.id, args.branch, args.verbose);
       task.worktreePath = wp;
 
-      const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch);
-      child = spawnAgent(task, brief, provider, args.model, wp, args.projectPath, args.verbose);
+      const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+      const directModel = task.type === "qa" ? args.models.qa.model : args.models.implementation.model;
+      child = spawnAgent(task, brief, provider, directModel, wp, args.projectPath, args.verbose);
       task.process = child;
     } catch (e: unknown) {
       task.status = "failed";

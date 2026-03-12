@@ -19,7 +19,8 @@ vi.mock("../src/memory.js", () => ({
 import { readFileSync } from "node:fs";
 import { readMemorySnapshot } from "../src/memory.js";
 import { buildBrief } from "../src/brief.js";
-import type { Task } from "../src/types.js";
+import type { Task, ModelConfig, Provider } from "../src/types.js";
+import { defaultModelConfig } from "../src/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,21 @@ function makeDepTask(overrides: Partial<Task> = {}): Task {
     lastLine: "",
     bytesReceived: 1000,
     ...overrides,
+  };
+}
+
+function mockProvider(): Provider {
+  return {
+    name: "claude",
+    spawn: vi.fn() as any,
+    parseStream: vi.fn() as any,
+    createStreamParser: vi.fn() as any,
+    healthCheck: vi.fn() as any,
+    subagentModelHint(fullModel: string): string {
+      if (fullModel.includes("opus")) return "opus";
+      if (fullModel.includes("haiku")) return "haiku";
+      return "sonnet";
+    },
   };
 }
 
@@ -372,5 +388,58 @@ describe("buildBrief for QA tasks", () => {
     const task = makeTask({ type: "qa" });
     const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
     expect(brief).toContain("never to the repo root");
+  });
+});
+
+// ─── Sub-Agent Model Injection ──────────────────────────────────────────────
+
+describe("buildBrief sub-agent model injection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("includes Sub-Agent Models section in implementation briefs", () => {
+    const task = makeTask();
+    const models = defaultModelConfig();
+    const provider = mockProvider();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+
+    expect(brief).toContain("## Sub-Agent Models");
+    expect(brief).toContain('Explore sub-agents: model: "sonnet"');
+    expect(brief).toContain('Plan Review sub-agents: model: "opus"');
+    expect(brief).toContain('Code Review sub-agents: model: "sonnet"');
+  });
+
+  it("includes Sub-Agent Models section in QA briefs with fixer hint only", () => {
+    const task = makeTask({ type: "qa" });
+    const models = defaultModelConfig();
+    const provider = mockProvider();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+
+    expect(brief).toContain("## Sub-Agent Models");
+    expect(brief).toContain('Fixer sub-agents: model: "opus"');
+    expect(brief).not.toContain("Explore sub-agents");
+    expect(brief).not.toContain("Plan Review sub-agents");
+    expect(brief).not.toContain("Code Review sub-agents");
+  });
+
+  it("uses custom model hints when config overrides defaults", () => {
+    const task = makeTask();
+    const models = defaultModelConfig();
+    models.explore = { provider: "claude", model: "claude-haiku-4-5-20251001" };
+    const provider = mockProvider();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+
+    expect(brief).toContain('Explore sub-agents: model: "haiku"');
+    expect(brief).toContain('Plan Review sub-agents: model: "opus"');
+  });
+
+  it("omits Sub-Agent Models section when models/provider not provided", () => {
+    const task = makeTask();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).not.toContain("## Sub-Agent Models");
   });
 });

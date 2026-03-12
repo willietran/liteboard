@@ -55,7 +55,7 @@ If Playwright is unavailable or this is not a web app, skip this step.
 `[STAGE: Fixing]`
 
 When you encounter code failures:
-1. Spawn a fixer sub-agent via the **Agent tool** with:
+1. Spawn a fixer sub-agent via the **Agent tool** with the model from the Sub-Agent Models section (Fixer). Include:
    - The exact error output
    - Which step failed (build, smoke, QA)
    - Instructions to fix the root cause and verify with `npx tsc --noEmit && npm run build && npm test`

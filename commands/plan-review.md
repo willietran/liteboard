@@ -9,7 +9,7 @@ Spawn an independent review subagent to evaluate the implementation plan before 
    - The design doc or task description
    - The project manifest / relevant context files
 
-2. Spawn a review subagent using the Agent tool with `subagent_type="superpowers:code-reviewer"`. Send it all three artifacts along with the evaluation criteria from `commands/code-reviewer.md`. Ask the reviewer to assess:
+2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Send it all three artifacts along with the evaluation criteria from `commands/code-reviewer.md`. Ask the reviewer to assess:
    - Does the plan address the full scope of the task?
    - Are the steps in the right order with correct dependencies?
    - Are verification commands sufficient to catch regressions?

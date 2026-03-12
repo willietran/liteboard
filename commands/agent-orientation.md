@@ -19,8 +19,8 @@ These markers are parsed by the orchestrator dashboard. Do not skip them.
 
 ## Spawning Subagents
 
-- **Explore subagent**: Use the Agent tool with `subagent_type="Explore"` to search, read, and analyze code without making changes.
-- **Review subagent**: Use the Agent tool with `subagent_type="superpowers:code-reviewer"` to get independent code or plan reviews against the criteria in `commands/code-reviewer.md`.
+- **Explore subagent**: Use the Agent tool with `subagent_type="Explore"` and the model from the Sub-Agent Models section (Explore).
+- **Review subagent**: Use the Agent tool with the model from the Sub-Agent Models section (Plan Review or Code Review, depending on the phase).
 
 ## Plan Execution Discipline
 

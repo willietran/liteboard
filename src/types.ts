@@ -64,12 +64,29 @@ export interface Task {
 
 // ─── Model Config ─────────────────────────────────────────────────────────
 
+export interface AgentSlotConfig {
+  provider: string;
+  model: string;
+}
+
 export interface ModelConfig {
-  brainstorm: { provider: string; model: string };
-  taskManifest: { provider: string; model: string };
-  architectReview: { provider: string; model: string };
-  implementation: { provider: string; model: string };
-  reviewGates: { provider: string; model: string };
+  implementation: AgentSlotConfig;
+  qa:             AgentSlotConfig;
+  explore:        AgentSlotConfig;
+  planReview:     AgentSlotConfig;
+  codeReview:     AgentSlotConfig;
+  qaFixer:        AgentSlotConfig;
+}
+
+export function defaultModelConfig(): ModelConfig {
+  return {
+    implementation: { provider: "claude", model: "claude-opus-4-6" },
+    qa:             { provider: "claude", model: "claude-opus-4-6" },
+    explore:        { provider: "claude", model: "claude-sonnet-4-6" },
+    planReview:     { provider: "claude", model: "claude-opus-4-6" },
+    codeReview:     { provider: "claude", model: "claude-sonnet-4-6" },
+    qaFixer:        { provider: "claude", model: "claude-opus-4-6" },
+  };
 }
 
 // ─── Stream Events ────────────────────────────────────────────────────────
@@ -96,6 +113,8 @@ export interface Provider {
   /** Creates an independent stream parser with its own buffer. */
   createStreamParser(): StreamParser;
   healthCheck(): Promise<boolean>;
+  /** Translates a full model ID to the Agent tool shorthand for this provider. */
+  subagentModelHint(fullModel: string): string;
 }
 
 // ─── Spawn Options ────────────────────────────────────────────────────────
@@ -112,7 +131,7 @@ export interface SpawnOpts {
 export interface CLIArgs {
   projectPath: string;
   concurrency: number;
-  model: string;
+  models: ModelConfig;
   branch: string;
   taskFilter: number[] | null;
   dryRun: boolean;
