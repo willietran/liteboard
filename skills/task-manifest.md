@@ -127,7 +127,7 @@ T10: Final QA (depends on all)
 - QA task commit messages describe the squash merge (e.g., `qa: validate integration for tasks 1-5`). Inner fixer sub-agent commits use `fix(qa): <description>` — these get squashed
 
 ### Quality Contract
-- All tasks inherit quality standards (DRY, security, performance, elegance) — injected automatically via the agent brief
+- All tasks inherit quality standards injected via the agent brief: code elegance, DRY, security, performance, TDD discipline, code organization, testing thoroughness, debugging ease, and cleanup culture
 - TDD tasks must follow strict RED → GREEN → REFACTOR with verification at each step
 - All tasks must pass `tsc --noEmit`, `npm run build`, `npm test` before merge
 - Review gates (plan review + code review) are mandatory and blocking
@@ -137,7 +137,7 @@ T10: Final QA (depends on all)
 
 After generating the manifest:
 1. Dispatch a critic subagent via the Agent tool (max 3 rounds)
-2. Critic evaluates: completeness, security, DRY, dependency correctness, explore coverage, performance (algorithmic complexity, I/O patterns), code elegance (clean abstractions, minimal complexity), and TDD coverage (are the right tasks marked TDD?)
+2. Critic evaluates: completeness, security, DRY, dependency correctness, explore coverage, performance (algorithmic complexity, I/O patterns), code elegance (clean abstractions, minimal complexity), TDD coverage (are the right tasks marked TDD?), code organization (file structure, module boundaries), and debuggability (error handling patterns, informative errors)
 3. Process feedback critically — push back on wrong suggestions
 4. Update manifest with accepted changes
 5. Write audit trail to `docs/liteboard/<slug>/architect-review.md`

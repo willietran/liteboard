@@ -90,6 +90,8 @@ After writing the design doc:
 > 7. **Performance**: Potential O(n²) patterns, N+1 issues, unnecessary I/O?
 > 8. **TDD strategy**: Are testable components identified? Are boundaries between logic and side effects clear?
 > 9. **Code elegance**: Does the design favor clean abstractions and minimal complexity? Simpler alternatives not considered?
+> 10. **Code organization**: Does the design produce a navigable file structure? Are module boundaries clear? Will a new contributor find things by intuition?
+> 11. **Debuggability**: Are error paths explicit? Will failures be diagnosable from logs/output? Are error messages informative?
 >
 > Be specific. Reference sections by name. Flag blocking issues vs nice-to-haves.
 

@@ -18,6 +18,8 @@ Spawn an independent review subagent to evaluate the implementation plan before 
    - Does the plan include test-first steps for TDD tasks? (write test → verify RED → implement → verify GREEN → refactor)
    - Performance concerns in proposed approach? (algorithm complexity, I/O patterns, N+1)
    - Clean, elegant design? (minimal abstractions, no over-engineering, idiomatic patterns)
+   - Does the plan describe a clear, navigable code organization? (file structure, module boundaries, naming conventions)
+   - Does the plan include an error handling strategy? (how failures surface, what information errors carry, debugging ease)
 
 3. Receive the review. For each piece of feedback:
    - If valid: update the plan accordingly.
