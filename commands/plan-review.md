@@ -12,7 +12,7 @@ Spawn an independent review subagent to evaluate the implementation plan before 
 2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Instruct the reviewer: review by reading only — do not create files, scaffold projects, or install packages. Send it all three artifacts. Ask the reviewer to evaluate across these dimensions:
    - **Alignment** — Does the plan address the full scope of the task and remain consistent with the design doc?
    - **Completeness** — Are there missing steps, unaddressed requirements, or gaps?
-   - **Sequencing** — Are steps in the right order with correct dependencies?
+   - **Sequencing & isolation** — Are steps in the right order? Each task runs in an isolated worktree containing only its dependencies' merged output. Verify every task will have the imports, packages, and tooling it needs.
    - **Edge cases & risks** — Which failure modes or scenarios are not accounted for?
    - **Over-engineering** — Is the plan introducing more complexity than the task needs?
    - **Integration risk** — Could this conflict with or break other parts of the system?
