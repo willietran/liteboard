@@ -9,17 +9,15 @@ Spawn an independent review subagent to evaluate the implementation plan before 
    - The design doc or task description
    - The project manifest / relevant context files
 
-2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Send it all three artifacts along with the evaluation criteria from `commands/code-reviewer.md`. Ask the reviewer to assess:
+2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Instruct the reviewer: review by reading only — do not create files, scaffold projects, or install packages. Send it all three artifacts along with the evaluation criteria from `commands/code-reviewer.md`. Ask the reviewer to assess:
    - Does the plan address the full scope of the task?
    - Are the steps in the right order with correct dependencies?
    - Are verification commands sufficient to catch regressions?
    - Are there security, performance, or DRY concerns in the proposed approach?
    - Is anything missing or underspecified?
-   - Does the plan include test-first steps for TDD tasks? (write test → verify RED → implement → verify GREEN → refactor)
-   - Performance concerns in proposed approach? (algorithm complexity, I/O patterns, N+1)
-   - Clean, elegant design? (minimal abstractions, no over-engineering, idiomatic patterns)
-   - Does the plan describe a clear, navigable code organization? (file structure, module boundaries, naming conventions)
-   - Does the plan include an error handling strategy? (how failures surface, what information errors carry, debugging ease)
+   - For TDD tasks: does the plan include test-first steps? (RED → GREEN → REFACTOR)
+
+   **Proportionality**: Scale review depth to task complexity. Simple tasks (config changes, single-file edits, prompt tweaks) need scope/correctness/dependency checks — not exhaustive OWASP audits or architecture reviews. Reserve deep security, performance, and design scrutiny for tasks that introduce new modules, APIs, or data flows.
 
 3. Receive the review. For each piece of feedback:
    - If valid: update the plan accordingly.

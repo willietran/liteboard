@@ -14,7 +14,9 @@ import {
   createProvider,
   getProviderEnv,
   checkOllamaHealth,
+  checkOllamaModel,
   validateOllamaBaseUrl,
+  pullOllamaModel,
 } from "../src/provider.js";
 
 const mockSpawn = vi.mocked(spawn);
@@ -598,6 +600,97 @@ describe("checkOllamaHealth", () => {
       "http://localhost:11434/api/tags",
       expect.any(Object),
     );
+  });
+});
+
+// ── checkOllamaModel ────────────────────────────────────────────────────────
+
+describe("checkOllamaModel", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns true when /api/show returns ok for the model", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+    const result = await checkOllamaModel("http://localhost:11434", "minimax-m2.5:cloud");
+    expect(result).toBe(true);
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:11434/api/show",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "minimax-m2.5:cloud" }),
+      }),
+    );
+  });
+
+  it("returns false when /api/show returns non-ok (model not found)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+    const result = await checkOllamaModel("http://localhost:11434", "nonexistent:cloud");
+    expect(result).toBe(false);
+  });
+
+  it("returns false when fetch throws a network error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
+
+    const result = await checkOllamaModel("http://localhost:11434", "some-model");
+    expect(result).toBe(false);
+  });
+
+  it("strips trailing slash from baseUrl", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+    await checkOllamaModel("http://localhost:11434/", "test-model");
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:11434/api/show",
+      expect.any(Object),
+    );
+  });
+
+  it("returns false when fetch is aborted by timeout", async () => {
+    const err = new DOMException("The operation was aborted", "TimeoutError");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(err));
+
+    const result = await checkOllamaModel("http://localhost:11434", "slow-model");
+    expect(result).toBe(false);
+  });
+});
+
+// ── pullOllamaModel ─────────────────────────────────────────────────────────
+
+describe("pullOllamaModel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns true when ollama pull succeeds", () => {
+    mockExecFileSync.mockReturnValue(Buffer.from(""));
+    const result = pullOllamaModel("llama3:8b");
+    expect(result).toBe(true);
+    expect(mockExecFileSync).toHaveBeenCalledWith("ollama", ["pull", "llama3:8b"], {
+      stdio: "pipe",
+      timeout: 30000,
+    });
+  });
+
+  it("returns false when ollama pull fails", () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error("pull failed");
+    });
+    const result = pullOllamaModel("nonexistent-model");
+    expect(result).toBe(false);
+  });
+
+  it("returns false when ollama pull times out", () => {
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("TIMEOUT") as NodeJS.ErrnoException;
+      err.code = "ETIMEDOUT";
+      throw err;
+    });
+    const result = pullOllamaModel("large-model");
+    expect(result).toBe(false);
   });
 });
 

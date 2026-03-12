@@ -26,6 +26,7 @@ These markers are parsed by the orchestrator dashboard. Do not skip them.
 - Include a verification command for each step so the implementation agent can confirm correctness.
 - For TDD tasks, structure the plan as RED → GREEN → REFACTOR: write the test first, verify it fails, implement, verify it passes, refactor.
 - If the task has dependencies, verify those dependencies are present in the worktree before planning.
+- **Exploration scope**: Explore only files and directories within the current worktree that are relevant to your task. Do not explore sibling projects, unrelated features, or traverse the entire repository. If the task creates `src/foo.ts`, explore `src/` for patterns — not the entire tree. Pass this scope constraint to your Explore subagent.
 - Stop immediately when blocked — missing context, unclear requirement, circular dependency. Describe the blocker clearly rather than guessing.
 
 ## Plan Output

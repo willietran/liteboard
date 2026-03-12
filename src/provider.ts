@@ -226,6 +226,32 @@ export async function checkOllamaHealth(baseUrl: string): Promise<boolean> {
   }
 }
 
+/** Checks if a specific model is registered in Ollama via /api/show. */
+export async function checkOllamaModel(baseUrl: string, model: string): Promise<boolean> {
+  try {
+    const normalized = baseUrl.replace(/\/$/, "");
+    const response = await fetch(`${normalized}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Pulls an Ollama model. Returns true on success, false on failure/timeout. */
+export function pullOllamaModel(model: string): boolean {
+  try {
+    execFileSync("ollama", ["pull", model], { stdio: "pipe", timeout: 30000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Validates that an Ollama base URL is a valid http or https URL. Throws on invalid. */
 export function validateOllamaBaseUrl(url: string): void {
   let parsed: URL;

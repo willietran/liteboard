@@ -8,7 +8,7 @@ import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
 import { appendMemoryEntry } from "./memory.js";
-import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, getProviderEnv } from "./provider.js";
+import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, checkOllamaModel, pullOllamaModel, getProviderEnv } from "./provider.js";
 import { parseProjectConfig, validateConfig, hasOllamaProvider, applyOllamaFallback } from "./config.js";
 import {
   setupFeatureBranch,
@@ -156,6 +156,26 @@ async function checkPrereqs(args: CLIArgs): Promise<void> {
         // args.models is mutated in-place (same reference as projectConfig.agents)
       } else {
         die(`Ollama is not reachable at ${baseUrl}. Start Ollama or set fallback: true in config.json.`);
+      }
+    } else {
+      // Server is healthy — verify each Ollama model is registered
+      const ollamaModels = new Set<string>();
+      for (const agent of Object.values(args.models)) {
+        if (agent.provider === "ollama") ollamaModels.add(agent.model);
+      }
+      const modelChecks = await Promise.all(
+        [...ollamaModels].map(async (model) => ({
+          model,
+          available: await checkOllamaModel(baseUrl, model),
+        })),
+      );
+      for (const { model, available } of modelChecks) {
+        if (!available) {
+          log(`Ollama model '${model}' not registered. Pulling...`);
+          if (!pullOllamaModel(model)) {
+            die(`Failed to pull Ollama model '${model}' (timed out after 30s). Run manually: ollama pull ${model}`);
+          }
+        }
       }
     }
   }
