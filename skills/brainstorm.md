@@ -60,13 +60,29 @@ docs/liteboard/<slug>/
 Default `config.json`:
 ```json
 {
-  "models": {
-    "implementation": { "provider": "claude", "model": "claude-opus-4-6" },
-    "qa":             { "provider": "claude", "model": "claude-opus-4-6" },
-    "explore":        { "provider": "claude", "model": "claude-sonnet-4-6" },
-    "planReview":     { "provider": "claude", "model": "claude-opus-4-6" },
-    "codeReview":     { "provider": "claude", "model": "claude-sonnet-4-6" },
-    "qaFixer":        { "provider": "claude", "model": "claude-opus-4-6" }
+  "agents": {
+    "architect": {
+      "provider": "claude",
+      "model": "claude-opus-4-6",
+      "subagents": {
+        "explore": { "model": "claude-sonnet-4-6" },
+        "planReview": { "model": "claude-opus-4-6" }
+      }
+    },
+    "implementation": {
+      "provider": "claude",
+      "model": "claude-opus-4-6",
+      "subagents": {
+        "codeReview": { "model": "claude-sonnet-4-6" }
+      }
+    },
+    "qa": {
+      "provider": "claude",
+      "model": "claude-opus-4-6",
+      "subagents": {
+        "qaFixer": { "model": "claude-opus-4-6" }
+      }
+    }
   },
   "concurrency": 1
 }
