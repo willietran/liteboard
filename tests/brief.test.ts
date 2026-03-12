@@ -93,7 +93,7 @@ function mockProvider(): Provider {
     parseStream: vi.fn() as any,
     createStreamParser: vi.fn() as any,
     healthCheck: vi.fn() as any,
-    subagentModelHint(fullModel: string): string {
+    subagentModelHint(fullModel: string, _providerName: string): string {
       if (fullModel.includes("opus")) return "opus";
       if (fullModel.includes("haiku")) return "haiku";
       return "sonnet";
@@ -428,7 +428,7 @@ describe("buildBrief sub-agent model injection", () => {
   it("uses custom model hints when config overrides defaults", () => {
     const task = makeTask();
     const models = defaultModelConfig();
-    models.explore = { provider: "claude", model: "claude-haiku-4-5-20251001" };
+    models.architect.subagents.explore = { model: "claude-haiku-4-5-20251001" };
     const provider = mockProvider();
     const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
 

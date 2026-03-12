@@ -66,9 +66,9 @@ export function buildBrief(
   if (models && provider) {
     parts.push("## Sub-Agent Models");
     parts.push("When spawning sub-agents via the Agent tool, use these model settings:");
-    parts.push(`- Explore sub-agents: model: "${provider.subagentModelHint(models.explore.model)}"`);
-    parts.push(`- Plan Review sub-agents: model: "${provider.subagentModelHint(models.planReview.model)}"`);
-    parts.push(`- Code Review sub-agents: model: "${provider.subagentModelHint(models.codeReview.model)}"`);
+    parts.push(`- Explore sub-agents: model: "${provider.subagentModelHint(models.architect.subagents.explore.model, "claude")}"`);
+    parts.push(`- Plan Review sub-agents: model: "${provider.subagentModelHint(models.architect.subagents.planReview.model, "claude")}"`);
+    parts.push(`- Code Review sub-agents: model: "${provider.subagentModelHint(models.implementation.subagents.codeReview.model, "claude")}"`);
     parts.push("");
   }
 
@@ -190,7 +190,7 @@ function buildQABrief(
   if (models && provider) {
     parts.push("## Sub-Agent Models");
     parts.push("When spawning sub-agents via the Agent tool, use these model settings:");
-    parts.push(`- Fixer sub-agents: model: "${provider.subagentModelHint(models.qaFixer.model)}"`);
+    parts.push(`- Fixer sub-agents: model: "${provider.subagentModelHint(models.qa.subagents.qaFixer.model, "claude")}"`);
     parts.push("");
   }
 

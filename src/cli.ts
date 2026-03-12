@@ -70,7 +70,7 @@ Options:
     if (arg.startsWith("--concurrency=")) {
       concurrency = Math.max(1, Math.min(5, parseInt(arg.slice("--concurrency=".length), 10)));
     } else if (arg.startsWith("--model=")) {
-      models.implementation = { ...models.implementation, model: arg.slice("--model=".length) };
+      models.implementation.model = arg.slice("--model=".length);
     } else if (arg.startsWith("--branch=")) {
       branch = arg.slice("--branch=".length);
     } else if (arg.startsWith("--tasks=")) {
@@ -239,15 +239,34 @@ async function main(): Promise<void> {
       if (config.branch && !process.argv.some(a => a.startsWith("--branch"))) {
         args.branch = config.branch;
       }
-      // Merge model slots from config.json (CLI --model flag takes priority for implementation)
+      // Warn on deprecated flat "models" key
       if (config.models) {
+        log("\x1b[33mWarning: config.json uses deprecated flat 'models' key. Ignoring — using defaults. Update to the new 'agents' format.\x1b[0m");
+      }
+      // Merge nested agent config from config.json
+      if (config.agents) {
         const cliHasModel = process.argv.some(a => a.startsWith("--model"));
-        for (const slot of ["implementation", "qa", "explore", "planReview", "codeReview", "qaFixer"] as const) {
-          if (config.models[slot]?.provider || config.models[slot]?.model) {
-            if (slot === "implementation" && cliHasModel) continue;
-            args.models[slot] = { ...args.models[slot], ...config.models[slot] };
+        for (const role of ["architect", "implementation", "qa"] as const) {
+          if (config.agents[role]) {
+            const src = config.agents[role];
+            if (src.provider) args.models[role].provider = src.provider;
+            if (src.model) {
+              if (role === "implementation" && cliHasModel) { /* CLI takes priority */ }
+              else args.models[role].model = src.model;
+            }
+            if (src.subagents) {
+              for (const [subName, subCfg] of Object.entries(src.subagents)) {
+                if (subCfg && typeof subCfg === "object" && "model" in subCfg) {
+                  args.models[role].subagents[subName] = { model: (subCfg as { model: string }).model };
+                }
+              }
+            }
           }
         }
+      }
+      // Load ollama config
+      if (config.ollama) {
+        args.ollama = config.ollama;
       }
     } catch {
       log("\x1b[33mWarning: Could not parse config.json\x1b[0m");

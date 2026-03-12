@@ -392,19 +392,19 @@ describe("ClaudeCodeProvider", () => {
 
   describe("subagentModelHint", () => {
     it('returns "opus" for opus model IDs', () => {
-      expect(provider.subagentModelHint("claude-opus-4-6")).toBe("opus");
+      expect(provider.subagentModelHint("claude-opus-4-6", "claude")).toBe("opus");
     });
 
     it('returns "sonnet" for sonnet model IDs', () => {
-      expect(provider.subagentModelHint("claude-sonnet-4-6")).toBe("sonnet");
+      expect(provider.subagentModelHint("claude-sonnet-4-6", "claude")).toBe("sonnet");
     });
 
     it('returns "haiku" for haiku model IDs', () => {
-      expect(provider.subagentModelHint("claude-haiku-4-5-20251001")).toBe("haiku");
+      expect(provider.subagentModelHint("claude-haiku-4-5-20251001", "claude")).toBe("haiku");
     });
 
     it('returns "sonnet" as fallback for unknown model IDs', () => {
-      expect(provider.subagentModelHint("unknown-model")).toBe("sonnet");
+      expect(provider.subagentModelHint("unknown-model", "claude")).toBe("sonnet");
     });
   });
 
