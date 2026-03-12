@@ -51,6 +51,11 @@ function truncate(s: string, maxLen: number): string {
   return s.length > maxLen ? s.slice(0, maxLen - 1) + "\u2026" : s;
 }
 
+function providerTag(task: Task): string {
+  if (task.provider === "ollama") return `${YELLOW}[O]${RESET} `;
+  return `${CYAN}[C]${RESET} `;
+}
+
 export function renderStatus(tasks: Task[], projectDir: string): void {
   const cols = process.stdout.columns || 80;
   const total = tasks.length;
@@ -84,9 +89,9 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
         ? ` ${YELLOW}${t.stage}${RESET}`
         : (t.bytesReceived > 0 ? ` ${GRAY}Working...${RESET}` : "");
       const stageWidth = t.stage ? t.stage.length + 1 : (t.bytesReceived > 0 ? 11 : 0);
-      const last = truncate(t.lastLine || "starting...", Math.max(1, cols - 55 - stageWidth));
+      const last = truncate(t.lastLine || "starting...", Math.max(1, cols - 59 - stageWidth));
       lines.push(
-        `  ${CYAN}T${t.id}${RESET} ${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
+        `  ${CYAN}T${t.id}${RESET} ${providerTag(t)}${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
       );
     }
     lines.push("");
@@ -112,7 +117,7 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
     lines.push(`${RED}Failed (${failed}):${RESET}`);
     for (const t of tasks.filter((t) => t.status === "failed")) {
       lines.push(
-        `  ${RED}T${t.id}${RESET} ${t.title}  ${DIM}${truncate(t.lastLine, Math.max(1, cols - 40))}${RESET}`,
+        `  ${RED}T${t.id}${RESET} ${providerTag(t)}${t.title}  ${DIM}${truncate(t.lastLine, Math.max(1, cols - 44))}${RESET}`,
       );
     }
   }
