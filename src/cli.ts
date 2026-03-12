@@ -8,7 +8,7 @@ import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
 import { appendMemoryEntry } from "./memory.js";
-import { createProvider, validateOllamaBaseUrl, checkOllamaHealth } from "./provider.js";
+import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, getProviderEnv } from "./provider.js";
 import { parseProjectConfig, validateConfig, hasOllamaProvider, applyOllamaFallback } from "./config.js";
 import {
   setupFeatureBranch,
@@ -21,7 +21,7 @@ import {
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
 import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
-import { buildBrief } from "./brief.js";
+import { buildBrief, buildArchitectBrief, buildImplementationBrief } from "./brief.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
 
@@ -366,15 +366,126 @@ async function main(): Promise<void> {
     task.startedAt = new Date().toISOString();
 
     let wp: string;
-    let child: ReturnType<typeof spawnAgent>;
     try {
       wp = createWorktree(slug, task.id, args.branch, args.verbose);
       task.worktreePath = wp;
+    } catch (e: unknown) {
+      task.status = "failed";
+      task.stage = "";
+      task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+      cleanupWorktree(slug, task.id, args.branch, args.verbose);
+      writeProgress(filteredTasks, args.projectPath);
+      updateStatuses();
+      return;
+    }
 
-      const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
-      const directModel = task.type === "qa" ? args.models.qa.model : args.models.implementation.model;
-      child = spawnAgent(task, brief, provider, directModel, wp, args.projectPath, args.verbose);
-      task.process = child;
+    // Shared close handler for the final phase (implementation or QA)
+    const handleFinalClose = async (code: number | null, resolve: () => void) => {
+      if (code === 0) {
+        try {
+          // Read memory entry from artifacts directory
+          const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
+          let memBody = "";
+          if (fs.existsSync(memEntryPath)) {
+            memBody = fs.readFileSync(memEntryPath, "utf-8");
+          }
+
+          // Check if task produced any changes to merge
+          let hasDiff = true;
+          try {
+            git(["diff", "--quiet", args.branch, `${args.branch}-t${task.id}`], { verbose: args.verbose });
+            hasDiff = false; // exit 0 = no diff
+          } catch {
+            // exit 1 = has diff (expected for implementation tasks)
+          }
+
+          if (!hasDiff) {
+            // No changes to merge (QA passed clean, or edge case)
+            if (memBody) {
+              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+            }
+            task.status = "done";
+            task.stage = "";
+            task.completedAt = new Date().toISOString();
+          } else {
+            // Normal merge path
+            task.stage = "Merging";
+            await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
+
+            // Append memory AFTER successful merge
+            if (memBody) {
+              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+            }
+
+            task.status = "done";
+            task.stage = "";
+            task.completedAt = new Date().toISOString();
+          }
+        } catch (e: unknown) {
+          task.status = "failed";
+          task.stage = "";
+          task.lastLine = `[MERGE FAILED] ${(e instanceof Error ? e.message : String(e)).slice(0, 100)}`;
+        }
+      } else {
+        task.status = "failed";
+        task.stage = "";
+        task.lastLine = task.lastLine || `[EXIT ${code}]`;
+      }
+
+      // Capture QA report from artifacts directory
+      if (task.type === "qa") {
+        const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
+        if (fs.existsSync(qaReportPath)) {
+          qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
+        }
+      }
+
+      // Cleanup worktree — preserve task branch on merge failure for recovery
+      const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
+      cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
+      if (preserveBranch) {
+        log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
+      }
+      writeProgress(filteredTasks, args.projectPath);
+      updateStatuses();
+      activePromises.delete(task.id);
+      resolve();
+    };
+
+    // QA tasks: single-phase spawn (no architect)
+    if (task.type === "qa") {
+      task.provider = args.models.qa.provider;
+      let child: ReturnType<typeof spawnAgent>;
+      try {
+        const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+        const qaEnv = getProviderEnv(args.models.qa.provider, args.ollama);
+        child = spawnAgent(task, brief, provider, args.models.qa.model, wp, args.projectPath, args.verbose, qaEnv);
+        task.process = child;
+      } catch (e: unknown) {
+        task.status = "failed";
+        task.stage = "";
+        task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+        cleanupWorktree(slug, task.id, args.branch, args.verbose);
+        writeProgress(filteredTasks, args.projectPath);
+        updateStatuses();
+        return;
+      }
+
+      const promise = new Promise<void>((resolve) => {
+        child.on("close", (code) => handleFinalClose(code, resolve));
+      });
+      activePromises.set(task.id, promise);
+      return;
+    }
+
+    // Non-QA tasks: two-phase architect → implementation
+    task.provider = args.models.architect.provider;
+    let architectChild: ReturnType<typeof spawnAgent>;
+    try {
+      const architectBrief = buildArchitectBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+      const architectEnv = getProviderEnv(args.models.architect.provider, args.ollama);
+      architectChild = spawnAgent(task, architectBrief, provider, args.models.architect.model, wp, args.projectPath, args.verbose, architectEnv);
+      task.process = architectChild;
     } catch (e: unknown) {
       task.status = "failed";
       task.stage = "";
@@ -386,76 +497,64 @@ async function main(): Promise<void> {
     }
 
     const promise = new Promise<void>((resolve) => {
-      child.on("close", async (code) => {
-        if (code === 0) {
-          try {
-            // Read memory entry from artifacts directory
-            const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
-            let memBody = "";
-            if (fs.existsSync(memEntryPath)) {
-              memBody = fs.readFileSync(memEntryPath, "utf-8");
-            }
-
-            // Check if task produced any changes to merge
-            let hasDiff = true;
-            try {
-              git(["diff", "--quiet", args.branch, `${args.branch}-t${task.id}`], { verbose: args.verbose });
-              hasDiff = false; // exit 0 = no diff
-            } catch {
-              // exit 1 = has diff (expected for implementation tasks)
-            }
-
-            if (!hasDiff) {
-              // No changes to merge (QA passed clean, or edge case)
-              if (memBody) {
-                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
-              }
-              task.status = "done";
-              task.stage = "";
-              task.completedAt = new Date().toISOString();
-            } else {
-              // Normal merge path
-              task.stage = "Merging";
-              await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
-
-              // Append memory AFTER successful merge
-              if (memBody) {
-                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
-              }
-
-              task.status = "done";
-              task.stage = "";
-              task.completedAt = new Date().toISOString();
-            }
-          } catch (e: unknown) {
-            task.status = "failed";
-            task.stage = "";
-            task.lastLine = `[MERGE FAILED] ${(e instanceof Error ? e.message : String(e)).slice(0, 100)}`;
-          }
-        } else {
+      architectChild.on("close", (architectCode) => {
+        if (architectCode !== 0) {
           task.status = "failed";
           task.stage = "";
-          task.lastLine = task.lastLine || `[EXIT ${code}]`;
+          task.lastLine = `[ARCHITECT EXIT ${architectCode}]`;
+          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          writeProgress(filteredTasks, args.projectPath);
+          updateStatuses();
+          activePromises.delete(task.id);
+          resolve();
+          return;
         }
 
-        // Capture QA report from artifacts directory
-        if (task.type === "qa") {
-          const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
-          if (fs.existsSync(qaReportPath)) {
-            qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
-          }
+        // Verify plan was written
+        const planPath = path.join(artifactsDir(args.projectPath), `t${task.id}-task-plan.md`);
+        if (!fs.existsSync(planPath)) {
+          task.status = "failed";
+          task.stage = "";
+          task.lastLine = "[ARCHITECT] No task plan produced";
+          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          writeProgress(filteredTasks, args.projectPath);
+          updateStatuses();
+          activePromises.delete(task.id);
+          resolve();
+          return;
         }
 
-        // Cleanup worktree — preserve task branch on merge failure for recovery
-        const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
-        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
-        if (preserveBranch) {
-          log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
+        // Reset task state for phase 2 handoff
+        task.stage = "";
+        task.lastLine = "";
+        task.bytesReceived = 0;
+        task.turnCount = 0;
+
+        // Rename architect log and brief for debugging
+        const logDir = path.join(args.projectPath, "logs");
+        try { fs.renameSync(path.join(logDir, `t${task.id}.jsonl`), path.join(logDir, `t${task.id}-architect.jsonl`)); } catch {}
+        const artPath = artifactsDir(args.projectPath);
+        try { fs.renameSync(path.join(artPath, `t${task.id}-brief.md`), path.join(artPath, `t${task.id}-architect-brief.md`)); } catch {}
+
+        // Phase 2: Implementation
+        task.provider = args.models.implementation.provider;
+        try {
+          const implBrief = buildImplementationBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+          const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
+          const implChild = spawnAgent(task, implBrief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
+          task.process = implChild; // Dashboard + stall detection now tracks implementation process
+
+          implChild.on("close", (code) => handleFinalClose(code, resolve));
+        } catch (e: unknown) {
+          task.status = "failed";
+          task.stage = "";
+          task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          writeProgress(filteredTasks, args.projectPath);
+          updateStatuses();
+          activePromises.delete(task.id);
+          resolve();
         }
-        writeProgress(filteredTasks, args.projectPath);
-        updateStatuses();
-        activePromises.delete(task.id);
-        resolve();
       });
     });
 

@@ -26,6 +26,7 @@ export function spawnAgent(
   wp: string,
   projectDir: string,
   verbose: boolean,
+  env?: Record<string, string>,
 ): ChildProcess {
   // Write brief to artifacts directory (outside worktree, for debugging only)
   const briefPath = path.join(artifactsDir(projectDir), `t${task.id}-brief.md`);
@@ -39,7 +40,7 @@ export function spawnAgent(
   const logStream = fs.createWriteStream(logFile, { flags: "w" });
 
   // Spawn via provider
-  const child = provider.spawn({ prompt: brief, model, cwd: wp, verbose });
+  const child = provider.spawn({ prompt: brief, model, cwd: wp, verbose, env });
 
   // Create per-agent stream parser to avoid buffer corruption at concurrency > 1
   const parse = provider.createStreamParser();
