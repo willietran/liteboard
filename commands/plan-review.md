@@ -9,15 +9,16 @@ Spawn an independent review subagent to evaluate the implementation plan before 
    - The design doc or task description
    - The project manifest / relevant context files
 
-2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Instruct the reviewer: review by reading only — do not create files, scaffold projects, or install packages. Send it all three artifacts along with the evaluation criteria from `commands/code-reviewer.md`. Ask the reviewer to assess:
-   - Does the plan address the full scope of the task?
-   - Are the steps in the right order with correct dependencies?
-   - Are verification commands sufficient to catch regressions?
-   - Are there security, performance, or DRY concerns in the proposed approach?
-   - Is anything missing or underspecified?
-   - For TDD tasks: does the plan include test-first steps? (RED → GREEN → REFACTOR)
+2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Instruct the reviewer: review by reading only — do not create files, scaffold projects, or install packages. Send it all three artifacts. Ask the reviewer to evaluate across these dimensions:
+   - **Alignment** — Does the plan address the full scope of the task and remain consistent with the design doc?
+   - **Completeness** — Are there missing steps, unaddressed requirements, or gaps?
+   - **Sequencing** — Are steps in the right order with correct dependencies?
+   - **Edge cases & risks** — Which failure modes or scenarios are not accounted for?
+   - **Over-engineering** — Is the plan introducing more complexity than the task needs?
+   - **Integration risk** — Could this conflict with or break other parts of the system?
+   - **Testability** — Are verification commands sufficient to catch regressions?
 
-   **Proportionality**: Scale review depth to task complexity. Simple tasks (config changes, single-file edits, prompt tweaks) need scope/correctness/dependency checks — not exhaustive OWASP audits or architecture reviews. Reserve deep security, performance, and design scrutiny for tasks that introduce new modules, APIs, or data flows.
+   **Proportionality**: Scale review depth to task complexity. Simple tasks (config changes, single-file edits, prompt tweaks) need scope/correctness/dependency checks — not exhaustive security audits.
 
 3. Receive the review. For each piece of feedback:
    - If valid: update the plan accordingly.

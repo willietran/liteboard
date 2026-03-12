@@ -177,9 +177,6 @@ export function buildArchitectBrief(
   parts.push("### How to process review feedback:");
   parts.push(readCommand("receiving-code-review.md"));
   parts.push("");
-  parts.push("### Review criteria:");
-  parts.push(readCommand("code-reviewer.md"));
-  parts.push("");
 
   // 10. Plan output instruction
   parts.push("### Plan Output");

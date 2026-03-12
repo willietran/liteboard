@@ -384,12 +384,12 @@ describe("buildArchitectBrief", () => {
     expect(brief).not.toContain("# Session Review");
   });
 
-  it("includes receiving-code-review and code-reviewer for plan review criteria", () => {
+  it("includes receiving-code-review but not code-reviewer in architect brief", () => {
     const task = makeTask();
     const brief = buildArchitectBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
 
     expect(brief).toContain("# Receiving Code Review");
-    expect(brief).toContain("# Code Reviewer");
+    expect(brief).not.toContain("# Code Reviewer");
   });
 
   it("includes explore hints", () => {
