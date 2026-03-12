@@ -39,6 +39,16 @@ export async function squashMerge(
   return serialize(async () => {
     const taskBranch = `${featureBranch}-t${taskId}`;
     try {
+      // Guard: reset current HEAD if dirty (may be on any branch after a crash).
+      // A prior failed merge may have left MERGE_HEAD, staged changes, or
+      // an in-progress merge/rebase state on the current or a task branch.
+      const status = git(["status", "--porcelain"], { verbose });
+      if (status.length > 0) {
+        console.error(`[merger] dirty index detected before merge for task ${taskId}, resetting`);
+        try { git(["merge", "--abort"], { verbose }); } catch {}
+        try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
+      }
+
       // Resolve repo root so npm commands run from the right directory
       const repoRoot = git(["rev-parse", "--show-toplevel"], { verbose });
 
@@ -145,12 +155,13 @@ export async function squashMerge(
       // Step 4: Commit
       git(["commit", "-m", commitMessage], { verbose });
     } catch (e) {
-      try {
-        git(["merge", "--abort"], { verbose });
-      } catch {}
-      try {
-        git(["checkout", featureBranch], { verbose });
-      } catch {}
+      // Recovery: ensure feature branch is clean for the next queued merge.
+      // Note: resetAndThrow() already calls reset --hard for build failures,
+      // but this outer catch also handles commit failures, checkout failures,
+      // and other paths where reset hasn't run yet.
+      try { git(["merge", "--abort"], { verbose }); } catch {}
+      try { git(["checkout", featureBranch], { verbose }); } catch {}
+      try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
       throw e;
     }
   });

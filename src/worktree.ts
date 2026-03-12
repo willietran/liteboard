@@ -16,6 +16,20 @@ export function setupFeatureBranch(
   branch: string,
   verbose: boolean,
 ): void {
+  // Ensure repo has at least one commit (required for worktree creation)
+  try {
+    git(["rev-parse", "HEAD"], { verbose });
+  } catch {
+    // Unborn HEAD — create initial empty commit so worktrees can branch from it
+    try {
+      git(["commit", "--allow-empty", "-m", "chore: initial commit"], { verbose });
+    } catch (commitErr) {
+      throw new Error(
+        `Cannot create initial commit (is git user.name/email configured?): ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
+      );
+    }
+  }
+
   let branchExists = false;
   try {
     git(["rev-parse", "--verify", branch], { verbose });
@@ -72,6 +86,7 @@ export function cleanupWorktree(
   taskId: number,
   featureBranch: string,
   verbose: boolean,
+  opts?: { preserveBranch?: boolean },
 ): void {
   const wtPath = getWorktreePath(slug, taskId);
   const taskBranch = `${featureBranch}-t${taskId}`;
@@ -82,10 +97,12 @@ export function cleanupWorktree(
     // Always continue
   }
 
-  try {
-    git(["branch", "-D", taskBranch], { verbose });
-  } catch {
-    // Always continue
+  if (!opts?.preserveBranch) {
+    try {
+      git(["branch", "-D", taskBranch], { verbose });
+    } catch {
+      // Always continue
+    }
   }
 }
 
@@ -96,9 +113,12 @@ export function cleanupAllWorktrees(
   slug: string,
   featureBranch: string,
   verbose: boolean,
+  opts?: { preserveFailedBranches?: boolean },
 ): void {
   for (const task of tasks) {
-    cleanupWorktree(slug, task.id, featureBranch, verbose);
+    const preserveBranch = opts?.preserveFailedBranches &&
+      task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
+    cleanupWorktree(slug, task.id, featureBranch, verbose, { preserveBranch });
   }
 }
 

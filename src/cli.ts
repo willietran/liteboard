@@ -328,7 +328,7 @@ async function main(): Promise<void> {
     setTimeout(() => {
       clearInterval(dashboardInterval);
       if (isTTY()) process.stdout.write(SHOW_CURSOR);
-      cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose);
+      cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose, { preserveFailedBranches: true });
       writeProgress(filteredTasks, args.projectPath);
       process.exit(1);
     }, 10000);
@@ -420,8 +420,12 @@ async function main(): Promise<void> {
           }
         }
 
-        // Cleanup worktree always
-        cleanupWorktree(slug, task.id, args.branch, args.verbose);
+        // Cleanup worktree — preserve task branch on merge failure for recovery
+        const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
+        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
+        if (preserveBranch) {
+          log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
+        }
         writeProgress(filteredTasks, args.projectPath);
         updateStatuses();
         activePromises.delete(task.id);

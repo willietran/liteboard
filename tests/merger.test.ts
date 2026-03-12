@@ -366,3 +366,113 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
     expect(checkoutFeatureCalls.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+// ─── Pre-merge dirty index guard ──────────────────────────────────────────────
+
+describe("squashMerge — dirty index guard", () => {
+  it("resets dirty index before merge attempt", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "status" && a[1] === "--porcelain") {
+        return "M  src/dirty.ts";
+      }
+      return "";
+    });
+
+    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+
+    const calls = gitCalls();
+
+    // Should check status first
+    expect(calls).toContainEqual(["status", "--porcelain"]);
+
+    // Should abort and reset before proceeding
+    const statusIdx = calls.findIndex(c => c[0] === "status" && c[1] === "--porcelain");
+    const mergeAbortIdx = calls.findIndex((c, i) => i > statusIdx && c[0] === "merge" && c[1] === "--abort");
+    const resetIdx = calls.findIndex((c, i) => i > statusIdx && c[0] === "reset" && c[1] === "--hard");
+    const checkoutIdx = calls.findIndex(c => c[0] === "checkout" && c[1] === "feat/x");
+
+    expect(mergeAbortIdx).toBeGreaterThan(statusIdx);
+    expect(resetIdx).toBeGreaterThan(statusIdx);
+    expect(checkoutIdx).toBeGreaterThan(resetIdx);
+  });
+
+  it("proceeds normally when merge --abort fails inside guard", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "status" && a[1] === "--porcelain") {
+        return "M  src/dirty.ts";
+      }
+      // merge --abort throws (no merge in progress, just dirty files)
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
+        throw new Error("fatal: There is no merge to abort");
+      }
+      return "";
+    });
+
+    // Should still succeed — the catch {} in the guard silences the error
+    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+
+    const calls = gitCalls();
+    expect(calls).toContainEqual(["commit", "-m", "feat: test"]);
+  });
+
+  it("skips reset when index is clean", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "status" && a[1] === "--porcelain") {
+        return "";
+      }
+      return "";
+    });
+
+    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+
+    const calls = gitCalls();
+
+    // Should check status
+    expect(calls).toContainEqual(["status", "--porcelain"]);
+
+    // Should NOT have merge --abort or reset --hard before checkout
+    const statusIdx = calls.findIndex(c => c[0] === "status" && c[1] === "--porcelain");
+    const checkoutIdx = calls.findIndex(c => c[0] === "checkout" && c[1] === "feat/x");
+
+    // No reset --hard between status check and checkout
+    const resetsBetween = calls.filter(
+      (c, i) => i > statusIdx && i < checkoutIdx && c[0] === "reset" && c[1] === "--hard",
+    );
+    expect(resetsBetween).toHaveLength(0);
+  });
+});
+
+// ─── Outer catch strengthening ────────────────────────────────────────────────
+
+describe("squashMerge — outer catch includes reset --hard", () => {
+  it("runs merge --abort, checkout, and reset --hard on failure", async () => {
+    mockRunBuildValidation.mockReturnValue({
+      success: false,
+      failedPhase: "build",
+      error: "build failed",
+      stderr: "tsc error",
+      tscErrorCount: 1,
+      testFailCount: 0,
+      testPassCount: 0,
+    });
+
+    await expect(
+      squashMerge(5, "proj", "feat/x", "feat: bad", false),
+    ).rejects.toThrow();
+
+    const calls = gitCalls();
+
+    // Outer catch should run all three recovery steps
+    // Find the last merge --abort (from outer catch, not from conflict resolution)
+    const lastMergeAbort = calls.findLastIndex(c => c[0] === "merge" && c[1] === "--abort");
+    const lastCheckout = calls.findLastIndex(c => c[0] === "checkout" && c[1] === "feat/x");
+    const lastReset = calls.findLastIndex(c => c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
+
+    expect(lastMergeAbort).toBeGreaterThan(-1);
+    expect(lastCheckout).toBeGreaterThan(lastMergeAbort);
+    expect(lastReset).toBeGreaterThan(lastCheckout);
+  });
+});
