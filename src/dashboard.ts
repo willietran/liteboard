@@ -2,7 +2,8 @@ import type { Task } from "./types.js";
 
 export const HIDE_CURSOR = "\x1b[?25l";
 export const SHOW_CURSOR = "\x1b[?25h";
-export const CLEAR_SCREEN = "\x1b[2J";
+export const ENTER_ALT_SCREEN = "\x1b[?1049h";
+export const EXIT_ALT_SCREEN = "\x1b[?1049l";
 
 const CURSOR_HOME = "\x1b[H";
 const CLEAR_TO_EOL = "\x1b[K";
@@ -56,6 +57,13 @@ function providerTag(task: Task): string {
   return `${CYAN}[C]${RESET} `;
 }
 
+function clipSection(lines: string[], budget: number): string[] {
+  if (lines.length <= budget) return lines;
+  if (budget <= 0) return [];
+  if (budget === 1) return [`  ${DIM}... ${lines.length} rows clipped${RESET}`];
+  return [...lines.slice(0, budget - 1), `  ${DIM}... +${lines.length - budget + 1} more${RESET}`];
+}
+
 export function renderStatus(tasks: Task[], projectDir: string): void {
   const cols = process.stdout.columns || 80;
   const total = tasks.length;
@@ -65,21 +73,21 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   const queued = tasks.filter((t) => t.status === "queued");
   const blocked = tasks.filter((t) => t.status === "blocked");
 
-  const lines: string[] = [];
-
-  // Progress bar
+  // Header section (always shown)
+  const headerLines: string[] = [];
   const barWidth = Math.max(1, Math.min(40, cols - 30));
   const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
   const bar = "\u2588".repeat(filled) + "\u2591".repeat(barWidth - filled);
   const failStr = failed > 0 ? ` ${RED}${failed} failed${RESET}` : "";
-  lines.push(
+  headerLines.push(
     `${BOLD}Progress:${RESET} [${GREEN}${bar}${RESET}] ${done}/${total}${failStr}`,
   );
-  lines.push("");
+  headerLines.push("");
 
-  // Running tasks
+  // Running tasks section
+  const runningLines: string[] = [];
   if (running.length > 0) {
-    lines.push(`${BOLD}${CYAN}Running (${running.length}):${RESET}`);
+    runningLines.push(`${BOLD}${CYAN}Running (${running.length}):${RESET}`);
     for (const t of running) {
       const elapsed = formatElapsed(t.startedAt);
       const kb = (t.bytesReceived / 1024).toFixed(0);
@@ -90,53 +98,70 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
         : (t.bytesReceived > 0 ? ` ${GRAY}Working...${RESET}` : "");
       const stageWidth = t.stage ? t.stage.length + 1 : (t.bytesReceived > 0 ? 11 : 0);
       const last = truncate(t.lastLine || "starting...", Math.max(1, cols - 59 - stageWidth));
-      lines.push(
+      runningLines.push(
         `  ${CYAN}T${t.id}${RESET} ${providerTag(t)}${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
       );
     }
-    lines.push("");
+    runningLines.push("");
   }
 
-  // Status lists
+  // Summary lines (queued/blocked/done)
+  const summaryLines: string[] = [];
   if (queued.length > 0)
-    lines.push(
+    summaryLines.push(
       `${YELLOW}Queued (${queued.length}):${RESET} ${DIM}${queued.map((t) => `T${t.id}`).join(", ")}${RESET}`,
     );
   if (blocked.length > 0)
-    lines.push(
+    summaryLines.push(
       `${GRAY}Blocked (${blocked.length}):${RESET} ${DIM}${blocked.map((t) => `T${t.id}`).join(", ")}${RESET}`,
     );
   if (done > 0)
-    lines.push(
+    summaryLines.push(
       `${GREEN}Done (${done}):${RESET} ${DIM}${tasks
         .filter((t) => t.status === "done")
         .map((t) => `T${t.id}`)
         .join(", ")}${RESET}`,
     );
+
+  // Failed tasks section
+  const failedLines: string[] = [];
   if (failed > 0) {
-    lines.push(`${RED}Failed (${failed}):${RESET}`);
+    failedLines.push(`${RED}Failed (${failed}):${RESET}`);
     for (const t of tasks.filter((t) => t.status === "failed")) {
-      lines.push(
+      failedLines.push(
         `  ${RED}T${t.id}${RESET} ${providerTag(t)}${t.title}  ${DIM}${truncate(t.lastLine, Math.max(1, cols - 44))}${RESET}`,
       );
     }
   }
 
-  lines.push("");
-  lines.push(
+  // Footer section (always shown)
+  const footerLines: string[] = [
+    "",
     `${DIM}Logs: ${projectDir}/logs/t<N>.jsonl  (tail -f to watch)${RESET}`,
-  );
+  ];
 
   if (isTTY()) {
+    const maxRows = (process.stdout.rows || 24) - 1;
+    let budget = maxRows - headerLines.length - footerLines.length;
+
+    const clippedRunning = clipSection(runningLines, budget);
+    budget -= clippedRunning.length;
+
+    const clippedSummary = summaryLines.slice(0, budget);
+    budget -= clippedSummary.length;
+
+    const clippedFailed = clipSection(failedLines, budget);
+
+    const clippedLines = [...headerLines, ...clippedRunning, ...clippedSummary, ...clippedFailed, ...footerLines];
     const output = CURSOR_HOME
-      + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
+      + clippedLines.map((l) => l + CLEAR_TO_EOL).join("\n")
       + "\n"
       + CLEAR_BELOW;
     process.stdout.write(output);
   } else {
-    for (const line of lines) {
+    const allLines = [...headerLines, ...runningLines, ...summaryLines, ...failedLines, ...footerLines];
+    for (const line of allLines) {
       console.log(line);
     }
   }
 }
-

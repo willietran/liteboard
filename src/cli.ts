@@ -20,7 +20,7 @@ import {
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
-import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
+import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, ENTER_ALT_SCREEN, EXIT_ALT_SCREEN } from "./dashboard.js";
 import { buildBrief, buildArchitectBrief, buildImplementationBrief } from "./brief.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
@@ -352,7 +352,10 @@ async function main(): Promise<void> {
   }
 
   // Dashboard interval
-  if (isTTY()) process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
+  if (isTTY()) process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
+  process.on("exit", () => {
+    if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
+  });
   const dashboardInterval = setInterval(() => {
     renderStatus(filteredTasks, args.projectPath);
   }, 1000);
@@ -372,7 +375,7 @@ async function main(): Promise<void> {
 
     setTimeout(() => {
       clearInterval(dashboardInterval);
-      if (isTTY()) process.stdout.write(SHOW_CURSOR);
+      if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
       cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose, { preserveFailedBranches: true });
       writeProgress(filteredTasks, args.projectPath);
       process.exit(1);
@@ -641,7 +644,7 @@ async function main(): Promise<void> {
   const done = filteredTasks.filter(t => t.status === "done").length;
   const failed = filteredTasks.filter(t => t.status === "failed").length;
 
-  if (isTTY()) process.stdout.write(SHOW_CURSOR);
+  if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   console.log("");
   console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
 
@@ -660,7 +663,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(e => {
-  if (isTTY()) process.stdout.write(SHOW_CURSOR);
+  if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   console.error(e);
   process.exit(1);
 });
