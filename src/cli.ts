@@ -2,13 +2,14 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task, CLIArgs, ModelConfig } from "./types.js";
+import type { Task, CLIArgs } from "./types.js";
 import { defaultModelConfig } from "./types.js";
 import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
 import { appendMemoryEntry } from "./memory.js";
-import { createProvider } from "./provider.js";
+import { createProvider, validateOllamaBaseUrl, checkOllamaHealth } from "./provider.js";
+import { parseProjectConfig, validateConfig, hasOllamaProvider, applyOllamaFallback } from "./config.js";
 import {
   setupFeatureBranch,
   createWorktree,
@@ -108,7 +109,7 @@ Options:
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
 
-function checkPrereqs(args: CLIArgs): void {
+async function checkPrereqs(args: CLIArgs): Promise<void> {
   try {
     execFileSync("git", ["rev-parse", "--git-dir"], { stdio: "pipe" });
   } catch {
@@ -141,6 +142,22 @@ function checkPrereqs(args: CLIArgs): void {
     }
   } catch {
     // pgrep returns non-zero if no matches
+  }
+
+  // Ollama health check
+  const projectConfig = { agents: args.models, concurrency: args.concurrency, ollama: args.ollama };
+  if (hasOllamaProvider(projectConfig)) {
+    const baseUrl = args.ollama?.baseUrl ?? "http://localhost:11434";
+    validateOllamaBaseUrl(baseUrl);
+    const healthy = await checkOllamaHealth(baseUrl);
+    if (!healthy) {
+      if (args.ollama?.fallback) {
+        applyOllamaFallback(projectConfig);
+        // args.models is mutated in-place (same reference as projectConfig.agents)
+      } else {
+        die(`Ollama is not reachable at ${baseUrl}. Start Ollama or set fallback: true in config.json.`);
+      }
+    }
   }
 }
 
@@ -182,12 +199,38 @@ function ensureGitignores(projectDir: string): void {
 async function main(): Promise<void> {
   const args = parseArgs();
   setForcePipeMode(args.noTui);
-  checkPrereqs(args);
-  ensureGitignores(args.projectPath);
 
   const slug = path.basename(args.projectPath);
   const manifestPath = path.join(args.projectPath, "manifest.md");
   const designPath = path.join(args.projectPath, "design.md");
+
+  // Load and merge config.json (before checkPrereqs so Ollama health check has config)
+  const configPath = path.join(args.projectPath, "config.json");
+  const projectConfig = parseProjectConfig(configPath);
+
+  // Apply config values — CLI flags take priority
+  if (!process.argv.some(a => a.startsWith("--concurrency"))) {
+    args.concurrency = projectConfig.concurrency;
+  }
+  if (projectConfig.branch && !process.argv.some(a => a.startsWith("--branch"))) {
+    args.branch = projectConfig.branch;
+  }
+  const cliHasModel = process.argv.some(a => a.startsWith("--model"));
+  for (const role of ["architect", "implementation", "qa"] as const) {
+    if (role === "implementation" && cliHasModel) {
+      // Keep CLI-provided model, take other fields from config
+      args.models[role].provider = projectConfig.agents[role].provider;
+      args.models[role].subagents = projectConfig.agents[role].subagents;
+    } else {
+      args.models[role] = projectConfig.agents[role];
+    }
+  }
+  args.ollama = projectConfig.ollama;
+
+  validateConfig({ agents: args.models, concurrency: args.concurrency, ollama: args.ollama });
+
+  await checkPrereqs(args);
+  ensureGitignores(args.projectPath);
 
   // Parse manifest
   const tasks = parseManifest(manifestPath);
@@ -226,51 +269,6 @@ async function main(): Promise<void> {
     console.log(`\n  Total: ${filteredTasks.length} tasks, ${layers.length} layers`);
     console.log(`  Max parallelism: ${Math.max(...layers.map(l => l.taskIds.length))}\n`);
     process.exit(0);
-  }
-
-  // Read config.json if exists
-  const configPath = path.join(args.projectPath, "config.json");
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      if (config.concurrency && !process.argv.some(a => a.startsWith("--concurrency"))) {
-        args.concurrency = config.concurrency;
-      }
-      if (config.branch && !process.argv.some(a => a.startsWith("--branch"))) {
-        args.branch = config.branch;
-      }
-      // Warn on deprecated flat "models" key
-      if (config.models) {
-        log("\x1b[33mWarning: config.json uses deprecated flat 'models' key. Ignoring — using defaults. Update to the new 'agents' format.\x1b[0m");
-      }
-      // Merge nested agent config from config.json
-      if (config.agents) {
-        const cliHasModel = process.argv.some(a => a.startsWith("--model"));
-        for (const role of ["architect", "implementation", "qa"] as const) {
-          if (config.agents[role]) {
-            const src = config.agents[role];
-            if (src.provider) args.models[role].provider = src.provider;
-            if (src.model) {
-              if (role === "implementation" && cliHasModel) { /* CLI takes priority */ }
-              else args.models[role].model = src.model;
-            }
-            if (src.subagents) {
-              for (const [subName, subCfg] of Object.entries(src.subagents)) {
-                if (subCfg && typeof subCfg === "object" && "model" in subCfg) {
-                  args.models[role].subagents[subName] = { model: (subCfg as { model: string }).model };
-                }
-              }
-            }
-          }
-        }
-      }
-      // Load ollama config
-      if (config.ollama) {
-        args.ollama = config.ollama;
-      }
-    } catch {
-      log("\x1b[33mWarning: Could not parse config.json\x1b[0m");
-    }
   }
 
   // Startup cleanup
