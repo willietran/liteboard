@@ -60,6 +60,10 @@ docs/liteboard/<slug>/
 Default `config.json`:
 ```json
 {
+  "ollama": {
+    "baseUrl": "http://localhost:11434",
+    "fallback": true
+  },
   "agents": {
     "architect": {
       "provider": "claude",
