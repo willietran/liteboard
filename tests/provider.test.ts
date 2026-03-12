@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ChildProcess } from "node:child_process";
-import type { SpawnOpts, StreamEvent } from "../src/types.js";
+import type { SpawnOpts, StreamEvent, OllamaConfig } from "../src/types.js";
 
 // Mock child_process before importing the module under test
 vi.mock("node:child_process", () => ({
@@ -9,7 +9,13 @@ vi.mock("node:child_process", () => ({
 }));
 
 import { spawn, execFileSync } from "node:child_process";
-import { ClaudeCodeProvider, createProvider } from "../src/provider.js";
+import {
+  ClaudeCodeProvider,
+  createProvider,
+  getProviderEnv,
+  checkOllamaHealth,
+  validateOllamaBaseUrl,
+} from "../src/provider.js";
 
 const mockSpawn = vi.mocked(spawn);
 const mockExecFileSync = vi.mocked(execFileSync);
@@ -122,6 +128,42 @@ describe("ClaudeCodeProvider", () => {
     it("returns the ChildProcess from spawn", () => {
       const result = provider.spawn(baseOpts);
       expect(result).toBe(fakeChild);
+    });
+
+    it("merges opts.env into the child process environment", () => {
+      provider.spawn({
+        ...baseOpts,
+        env: { ANTHROPIC_BASE_URL: "http://localhost:11434", ANTHROPIC_AUTH_TOKEN: "ollama" },
+      });
+
+      const spawnOptions = mockSpawn.mock.calls[0][2] as {
+        env: Record<string, string | undefined>;
+      };
+      expect(spawnOptions.env.ANTHROPIC_BASE_URL).toBe("http://localhost:11434");
+      expect(spawnOptions.env.ANTHROPIC_AUTH_TOKEN).toBe("ollama");
+    });
+
+    it("works normally when opts.env is undefined", () => {
+      provider.spawn(baseOpts);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2] as {
+        env: Record<string, string | undefined>;
+      };
+      expect(spawnOptions.env).toBeDefined();
+      // Should still have process.env values minus CLAUDECODE
+      expect(spawnOptions.env.PATH).toBeDefined();
+    });
+
+    it("does not allow opts.env to re-insert CLAUDECODE", () => {
+      provider.spawn({
+        ...baseOpts,
+        env: { CLAUDECODE: "sneaky" },
+      });
+
+      const spawnOptions = mockSpawn.mock.calls[0][2] as {
+        env: Record<string, string | undefined>;
+      };
+      expect(spawnOptions.env.CLAUDECODE).toBeUndefined();
     });
   });
 
@@ -406,6 +448,14 @@ describe("ClaudeCodeProvider", () => {
     it('returns "sonnet" as fallback for unknown model IDs', () => {
       expect(provider.subagentModelHint("unknown-model", "claude")).toBe("sonnet");
     });
+
+    it('returns empty string for ollama provider', () => {
+      expect(provider.subagentModelHint("kimi-k2.5:cloud", "ollama")).toBe("");
+    });
+
+    it('returns empty string for any non-claude provider', () => {
+      expect(provider.subagentModelHint("claude-opus-4-6", "openai")).toBe("");
+    });
   });
 
   // ── healthCheck ───────────────────────────────────────────────────────────
@@ -441,5 +491,152 @@ describe("createProvider", () => {
     expect(() => createProvider("unknown-provider")).toThrow(
       /unknown provider/i,
     );
+  });
+});
+
+// ── getProviderEnv ──────────────────────────────────────────────────────────
+
+describe("getProviderEnv", () => {
+  it('returns undefined for "claude" provider', () => {
+    expect(getProviderEnv("claude")).toBeUndefined();
+  });
+
+  it('returns undefined for "claude" even when ollamaConfig is provided', () => {
+    const config: OllamaConfig = { baseUrl: "http://gpu:11434", fallback: false };
+    expect(getProviderEnv("claude", config)).toBeUndefined();
+  });
+
+  it('returns Ollama env vars with default baseUrl when no config provided', () => {
+    const env = getProviderEnv("ollama");
+    expect(env).toEqual({
+      ANTHROPIC_BASE_URL: "http://localhost:11434",
+      ANTHROPIC_AUTH_TOKEN: "ollama",
+      ANTHROPIC_API_KEY: "",
+    });
+  });
+
+  it('returns Ollama env vars using provided baseUrl', () => {
+    const config: OllamaConfig = { baseUrl: "http://gpu-box:11434", fallback: false };
+    const env = getProviderEnv("ollama", config);
+    expect(env).toEqual({
+      ANTHROPIC_BASE_URL: "http://gpu-box:11434",
+      ANTHROPIC_AUTH_TOKEN: "ollama",
+      ANTHROPIC_API_KEY: "",
+    });
+  });
+
+  it('sets ANTHROPIC_API_KEY to empty string for ollama', () => {
+    const env = getProviderEnv("ollama")!;
+    expect(env.ANTHROPIC_API_KEY).toBe("");
+  });
+
+  it('sets ANTHROPIC_AUTH_TOKEN to "ollama" for ollama', () => {
+    const env = getProviderEnv("ollama")!;
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("ollama");
+  });
+
+  it('returns undefined for unknown provider names', () => {
+    expect(getProviderEnv("openai")).toBeUndefined();
+  });
+});
+
+// ── checkOllamaHealth ───────────────────────────────────────────────────────
+
+describe("checkOllamaHealth", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns true when fetch returns ok response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+    const result = await checkOllamaHealth("http://localhost:11434");
+    expect(result).toBe(true);
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:11434/api/tags",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("returns false when fetch returns non-ok response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    const result = await checkOllamaHealth("http://localhost:11434");
+    expect(result).toBe(false);
+  });
+
+  it("returns false when fetch throws a network error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
+
+    const result = await checkOllamaHealth("http://localhost:11434");
+    expect(result).toBe(false);
+  });
+
+  it("calls the correct URL with /api/tags appended", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+    await checkOllamaHealth("http://gpu-box:11434");
+    expect(fetch).toHaveBeenCalledWith(
+      "http://gpu-box:11434/api/tags",
+      expect.any(Object),
+    );
+  });
+
+  it("returns false when fetch is aborted by timeout", async () => {
+    const err = new DOMException("The operation was aborted", "TimeoutError");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(err));
+
+    const result = await checkOllamaHealth("http://localhost:11434");
+    expect(result).toBe(false);
+  });
+
+  it("strips trailing slash from baseUrl before appending path", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+    await checkOllamaHealth("http://localhost:11434/");
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:11434/api/tags",
+      expect.any(Object),
+    );
+  });
+});
+
+// ── validateOllamaBaseUrl ───────────────────────────────────────────────────
+
+describe("validateOllamaBaseUrl", () => {
+  it("accepts valid http URL", () => {
+    expect(() => validateOllamaBaseUrl("http://localhost:11434")).not.toThrow();
+  });
+
+  it("accepts valid https URL", () => {
+    expect(() => validateOllamaBaseUrl("https://ollama.example.com")).not.toThrow();
+  });
+
+  it("throws on invalid URL string", () => {
+    expect(() => validateOllamaBaseUrl("not-a-url")).toThrow(
+      "Invalid ollama.baseUrl: must be an http:// or https:// URL",
+    );
+  });
+
+  it("throws on empty string", () => {
+    expect(() => validateOllamaBaseUrl("")).toThrow(
+      "Invalid ollama.baseUrl: must be an http:// or https:// URL",
+    );
+  });
+
+  it("throws on ftp protocol", () => {
+    expect(() => validateOllamaBaseUrl("ftp://localhost:11434")).toThrow(
+      "Invalid ollama.baseUrl: must be an http:// or https:// URL",
+    );
+  });
+
+  it("throws on file protocol", () => {
+    expect(() => validateOllamaBaseUrl("file:///etc/passwd")).toThrow(
+      "Invalid ollama.baseUrl: must be an http:// or https:// URL",
+    );
+  });
+
+  it("accepts http URL with custom port and path", () => {
+    expect(() => validateOllamaBaseUrl("http://192.168.1.100:8080")).not.toThrow();
   });
 });
