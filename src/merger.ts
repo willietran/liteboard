@@ -91,7 +91,9 @@ export async function squashMerge(
             git(["add", "package-lock.json"], { verbose });
           } else {
             // Other conflicts — abort, squash task branch, rebase, retry
-            git(["merge", "--abort"], { verbose });
+            // --squash does not create MERGE_HEAD, so merge --abort won't work.
+            // reset --hard restores the feature branch to its pre-merge state.
+            git(["reset", "--hard", "HEAD"], { verbose });
 
             // Squash task branch to a single commit
             git(["checkout", taskBranch], { verbose });
@@ -114,7 +116,7 @@ export async function squashMerge(
           }
         } catch (resolveErr) {
           try {
-            git(["merge", "--abort"], { verbose });
+            git(["reset", "--hard", "HEAD"], { verbose });
           } catch {}
           try {
             git(["checkout", featureBranch], { verbose });

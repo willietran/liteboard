@@ -343,6 +343,10 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
       ) {
         return "src/index.ts";
       }
+      // Simulate real squash merge: MERGE_HEAD doesn't exist, so merge --abort throws
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
+        throw new Error("fatal: There is no merge to abort (MERGE_HEAD missing)");
+      }
       return "";
     });
 
@@ -350,7 +354,16 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
 
     const calls = gitCalls();
 
-    expect(calls).toContainEqual(["merge", "--abort"]);
+    // Should use reset --hard (not merge --abort) to clean up after squash merge conflict
+    const conflictResetIdx = calls.findIndex(
+      (c, i) => {
+        // Find the reset --hard that comes after the first failed merge --squash
+        const mergeSquashIdx = calls.findIndex(cc => cc[0] === "merge" && cc[1] === "--squash");
+        return i > mergeSquashIdx && c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD";
+      },
+    );
+    expect(conflictResetIdx).toBeGreaterThan(-1);
+
     expect(calls).toContainEqual(["checkout", "feat/x-t6"]);
     expect(calls).toContainEqual(["reset", "--soft", "feat/x"]);
     expect(calls).toContainEqual([
@@ -364,6 +377,52 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
       (c) => c[0] === "checkout" && c[1] === "feat/x",
     );
     expect(checkoutFeatureCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("uses reset --hard instead of merge --abort for squash merge abort", async () => {
+    let mergeAttempt = 0;
+
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--squash") {
+        mergeAttempt++;
+        if (mergeAttempt === 1) {
+          throw new Error("merge conflict");
+        }
+        return "";
+      }
+      if (cmd === "git" && a[0] === "diff" && a.includes("--diff-filter=U")) {
+        return "tsconfig.json";
+      }
+      // merge --abort always throws for squash merges (no MERGE_HEAD)
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
+        throw new Error("fatal: There is no merge to abort (MERGE_HEAD missing)");
+      }
+      return "";
+    });
+
+    await squashMerge(7, "proj", "feat/x", "fix: config", false);
+
+    const calls = gitCalls();
+
+    // Must NOT contain merge --abort in the conflict resolution path
+    // (the outer catch may still attempt it as a defensive measure, but
+    // the conflict resolution block at line 94 should use reset --hard)
+    const firstMergeSquashIdx = calls.findIndex(c => c[0] === "merge" && c[1] === "--squash");
+    const taskCheckoutIdx = calls.findIndex(c => c[0] === "checkout" && c[1] === "feat/x-t7");
+
+    // Between failed squash merge and task branch checkout, should see reset --hard HEAD
+    const resetBetween = calls.filter(
+      (c, i) => i > firstMergeSquashIdx && i < taskCheckoutIdx &&
+        c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD",
+    );
+    expect(resetBetween.length).toBe(1);
+
+    // Full rebase-retry sequence should follow
+    expect(calls).toContainEqual(["checkout", "feat/x-t7"]);
+    expect(calls).toContainEqual(["reset", "--soft", "feat/x"]);
+    expect(calls).toContainEqual(["commit", "-m", "squashed: fix: config"]);
+    expect(calls).toContainEqual(["rebase", "feat/x"]);
   });
 });
 
