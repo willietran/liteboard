@@ -46,7 +46,7 @@ function parseArgs(): CLIArgs {
     console.log(`Usage: liteboard run <project-path-or-slug> [options]
 
 Options:
-  --concurrency=<N>       Max parallel agents, 1-5 (default: 1)
+  --concurrency=<N>       Max parallel agents (default: 1)
   --model=<model>         Override implementation model
   --branch=<name>         Feature branch name
   --tasks=<1,2,3>         Run specific task IDs only
@@ -69,7 +69,7 @@ Options:
   for (const arg of args) {
     if (arg === "run") continue;
     if (arg.startsWith("--concurrency=")) {
-      concurrency = Math.max(1, Math.min(5, parseInt(arg.slice("--concurrency=".length), 10)));
+      concurrency = Math.max(1, parseInt(arg.slice("--concurrency=".length), 10) || 1);
     } else if (arg.startsWith("--model=")) {
       models.implementation.model = arg.slice("--model=".length);
     } else if (arg.startsWith("--branch=")) {
@@ -613,15 +613,17 @@ async function main(): Promise<void> {
     }
 
     // Spawn queued tasks up to concurrency limit
-    if (runningTasks.length < args.concurrency && queuedTasks.length > 0) {
+    if (activePromises.size < args.concurrency && queuedTasks.length > 0) {
+      const spawnedThisIteration: Task[] = [];
       for (const task of queuedTasks) {
-        if (runningTasks.length + activePromises.size >= args.concurrency) break;
+        if (activePromises.size >= args.concurrency) break;
 
-        // Check file conflicts with running tasks
-        const hasConflict = runningTasks.some(rt => hasFileConflict(task, rt));
+        // Check file conflicts with running tasks and those spawned earlier this iteration
+        const hasConflict = [...runningTasks, ...spawnedThisIteration].some(rt => hasFileConflict(task, rt));
         if (hasConflict) continue;
 
         spawnTask(task);
+        spawnedThisIteration.push(task);
       }
     }
 
