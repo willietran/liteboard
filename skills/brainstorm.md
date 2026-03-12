@@ -61,11 +61,12 @@ Default `config.json`:
 ```json
 {
   "models": {
-    "brainstorm": { "provider": "claude", "model": "claude-opus-4-6" },
-    "taskManifest": { "provider": "claude", "model": "claude-opus-4-6" },
-    "architectReview": { "provider": "claude", "model": "claude-opus-4-6" },
     "implementation": { "provider": "claude", "model": "claude-opus-4-6" },
-    "reviewGates": { "provider": "claude", "model": "claude-sonnet-4-6" }
+    "qa":             { "provider": "claude", "model": "claude-opus-4-6" },
+    "explore":        { "provider": "claude", "model": "claude-sonnet-4-6" },
+    "planReview":     { "provider": "claude", "model": "claude-opus-4-6" },
+    "codeReview":     { "provider": "claude", "model": "claude-sonnet-4-6" },
+    "qaFixer":        { "provider": "claude", "model": "claude-opus-4-6" }
   },
   "concurrency": 1
 }
