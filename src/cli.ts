@@ -2,7 +2,8 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task, CLIArgs } from "./types.js";
+import type { Task, CLIArgs, ModelConfig } from "./types.js";
+import { defaultModelConfig } from "./types.js";
 import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
@@ -18,8 +19,10 @@ import {
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
-import { renderStatus, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
+import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
 import { buildBrief } from "./brief.js";
+import { git } from "./git.js";
+import { artifactsDir } from "./paths.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -47,25 +50,27 @@ Options:
   --branch=<name>         Feature branch name
   --tasks=<1,2,3>         Run specific task IDs only
   --dry-run               Parse and show dependency graph only
-  --verbose               Log all git commands to stderr`);
+  --verbose               Log all git commands to stderr
+  --no-tui                Disable TUI dashboard (line-based output)`);
     process.exit(0);
   }
 
   // First positional arg after "run" is the project path
   const positional: string[] = [];
   let concurrency = 1;
-  let model = "claude-opus-4-6";
+  const models = defaultModelConfig();
   let branch = "";
   let taskFilter: number[] | null = null;
   let dryRun = false;
   let verbose = false;
+  let noTui = false;
 
   for (const arg of args) {
     if (arg === "run") continue;
     if (arg.startsWith("--concurrency=")) {
       concurrency = Math.max(1, Math.min(5, parseInt(arg.slice("--concurrency=".length), 10)));
     } else if (arg.startsWith("--model=")) {
-      model = arg.slice("--model=".length);
+      models.implementation = { ...models.implementation, model: arg.slice("--model=".length) };
     } else if (arg.startsWith("--branch=")) {
       branch = arg.slice("--branch=".length);
     } else if (arg.startsWith("--tasks=")) {
@@ -74,6 +79,8 @@ Options:
       dryRun = true;
     } else if (arg === "--verbose") {
       verbose = true;
+    } else if (arg === "--no-tui") {
+      noTui = true;
     } else if (!arg.startsWith("--")) {
       positional.push(arg);
     }
@@ -96,7 +103,7 @@ Options:
     branch = `liteboard/${slug}`;
   }
 
-  return { projectPath, concurrency, model, branch, taskFilter, dryRun, verbose };
+  return { projectPath, concurrency, models, branch, taskFilter, dryRun, verbose, noTui };
 }
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
@@ -148,6 +155,14 @@ function ensureGitignores(projectDir: string): void {
     fs.writeFileSync(logsGitignore, "*\n", "utf-8");
   }
 
+  // Ensure artifacts/.gitignore
+  const artDir = artifactsDir(projectDir);
+  if (!fs.existsSync(artDir)) fs.mkdirSync(artDir, { recursive: true });
+  const artifactsGitignore = path.join(artDir, ".gitignore");
+  if (!fs.existsSync(artifactsGitignore)) {
+    fs.writeFileSync(artifactsGitignore, "*\n!.gitignore\n", "utf-8");
+  }
+
   // Ensure repo .gitignore has ephemeral patterns
   const repoGitignore = path.resolve(".gitignore");
   if (fs.existsSync(repoGitignore)) {
@@ -155,6 +170,7 @@ function ensureGitignores(projectDir: string): void {
     const additions: string[] = [];
     if (!content.includes(".brief-t")) additions.push(".brief-t*.md");
     if (!content.includes(".memory-entry")) additions.push(".memory-entry.md");
+    if (!content.includes(".qa-report")) additions.push(".qa-report.md");
     if (additions.length > 0) {
       fs.appendFileSync(repoGitignore, "\n" + additions.join("\n") + "\n", "utf-8");
     }
@@ -165,6 +181,7 @@ function ensureGitignores(projectDir: string): void {
 
 async function main(): Promise<void> {
   const args = parseArgs();
+  setForcePipeMode(args.noTui);
   checkPrereqs(args);
   ensureGitignores(args.projectPath);
 
@@ -222,8 +239,15 @@ async function main(): Promise<void> {
       if (config.branch && !process.argv.some(a => a.startsWith("--branch"))) {
         args.branch = config.branch;
       }
-      if (config.models?.implementation?.model && !process.argv.some(a => a.startsWith("--model"))) {
-        args.model = config.models.implementation.model;
+      // Merge model slots from config.json (CLI --model flag takes priority for implementation)
+      if (config.models) {
+        const cliHasModel = process.argv.some(a => a.startsWith("--model"));
+        for (const slot of ["implementation", "qa", "explore", "planReview", "codeReview", "qaFixer"] as const) {
+          if (config.models[slot]?.provider || config.models[slot]?.model) {
+            if (slot === "implementation" && cliHasModel) continue;
+            args.models[slot] = { ...args.models[slot], ...config.models[slot] };
+          }
+        }
       }
     } catch {
       log("\x1b[33mWarning: Could not parse config.json\x1b[0m");
@@ -232,6 +256,15 @@ async function main(): Promise<void> {
 
   // Startup cleanup
   cleanupStaleWorktrees(slug, args.verbose);
+
+  // Clean up artifacts from previous runs
+  const artDir = artifactsDir(args.projectPath);
+  if (fs.existsSync(artDir)) {
+    for (const f of fs.readdirSync(artDir)) {
+      if (f === ".gitignore") continue;
+      try { fs.unlinkSync(path.join(artDir, f)); } catch {}
+    }
+  }
 
   // Resume detection
   const previousProgress = readProgress(args.projectPath);
@@ -267,13 +300,26 @@ async function main(): Promise<void> {
 
   // Active promises
   const activePromises = new Map<number, Promise<void>>();
+  const qaReports = new Map<number, string>();
   let shuttingDown = false;
 
+  function printQAReports(): void {
+    if (qaReports.size === 0) return;
+    console.log("");
+    for (const [taskId, report] of qaReports) {
+      const task = filteredTasks.find(t => t.id === taskId);
+      const title = task?.title ?? "QA Validation";
+      console.log(`\x1b[1mT${taskId}: ${title}\x1b[0m`);
+      console.log(report);
+    }
+  }
+
   // Dashboard interval
-  process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
+  if (isTTY()) process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
   const dashboardInterval = setInterval(() => {
     renderStatus(filteredTasks, args.projectPath);
   }, 1000);
+  renderStatus(filteredTasks, args.projectPath);
 
   // Graceful shutdown
   process.on("SIGINT", () => {
@@ -289,8 +335,8 @@ async function main(): Promise<void> {
 
     setTimeout(() => {
       clearInterval(dashboardInterval);
-      process.stdout.write(SHOW_CURSOR);
-      cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose);
+      if (isTTY()) process.stdout.write(SHOW_CURSOR);
+      cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose, { preserveFailedBranches: true });
       writeProgress(filteredTasks, args.projectPath);
       process.exit(1);
     }, 10000);
@@ -308,8 +354,9 @@ async function main(): Promise<void> {
       wp = createWorktree(slug, task.id, args.branch, args.verbose);
       task.worktreePath = wp;
 
-      const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch);
-      child = spawnAgent(task, brief, provider, args.model, wp, args.projectPath, args.verbose);
+      const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+      const directModel = task.type === "qa" ? args.models.qa.model : args.models.implementation.model;
+      child = spawnAgent(task, brief, provider, directModel, wp, args.projectPath, args.verbose);
       task.process = child;
     } catch (e: unknown) {
       task.status = "failed";
@@ -325,25 +372,44 @@ async function main(): Promise<void> {
       child.on("close", async (code) => {
         if (code === 0) {
           try {
-            // Read memory entry from worktree
-            const memEntryPath = path.join(wp, ".memory-entry.md");
+            // Read memory entry from artifacts directory
+            const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
             let memBody = "";
             if (fs.existsSync(memEntryPath)) {
               memBody = fs.readFileSync(memEntryPath, "utf-8");
             }
 
-            // Squash merge
-            task.stage = "Merging";
-            await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
-
-            // Append memory AFTER successful merge
-            if (memBody) {
-              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+            // Check if task produced any changes to merge
+            let hasDiff = true;
+            try {
+              git(["diff", "--quiet", args.branch, `${args.branch}-t${task.id}`], { verbose: args.verbose });
+              hasDiff = false; // exit 0 = no diff
+            } catch {
+              // exit 1 = has diff (expected for implementation tasks)
             }
 
-            task.status = "done";
-            task.stage = "";
-            task.completedAt = new Date().toISOString();
+            if (!hasDiff) {
+              // No changes to merge (QA passed clean, or edge case)
+              if (memBody) {
+                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+              }
+              task.status = "done";
+              task.stage = "";
+              task.completedAt = new Date().toISOString();
+            } else {
+              // Normal merge path
+              task.stage = "Merging";
+              await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
+
+              // Append memory AFTER successful merge
+              if (memBody) {
+                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+              }
+
+              task.status = "done";
+              task.stage = "";
+              task.completedAt = new Date().toISOString();
+            }
           } catch (e: unknown) {
             task.status = "failed";
             task.stage = "";
@@ -355,8 +421,20 @@ async function main(): Promise<void> {
           task.lastLine = task.lastLine || `[EXIT ${code}]`;
         }
 
-        // Cleanup worktree always
-        cleanupWorktree(slug, task.id, args.branch, args.verbose);
+        // Capture QA report from artifacts directory
+        if (task.type === "qa") {
+          const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
+          if (fs.existsSync(qaReportPath)) {
+            qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
+          }
+        }
+
+        // Cleanup worktree — preserve task branch on merge failure for recovery
+        const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
+        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
+        if (preserveBranch) {
+          log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
+        }
         writeProgress(filteredTasks, args.projectPath);
         updateStatuses();
         activePromises.delete(task.id);
@@ -421,28 +499,32 @@ async function main(): Promise<void> {
     await Promise.allSettled(activePromises.values());
   }
 
+  // Stop task dashboard
   clearInterval(dashboardInterval);
-  process.stdout.write(SHOW_CURSOR);
 
-  // Final summary
   const done = filteredTasks.filter(t => t.status === "done").length;
   const failed = filteredTasks.filter(t => t.status === "failed").length;
 
+  if (isTTY()) process.stdout.write(SHOW_CURSOR);
   console.log("");
   console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
-  console.log(`  \x1b[32m${done} done\x1b[0m${failed > 0 ? `, \x1b[31m${failed} failed\x1b[0m` : ""} of ${filteredTasks.length} tasks`);
 
-  if (failed === 0 && done === filteredTasks.length) {
-    console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
-  } else if (failed > 0) {
+  if (failed > 0) {
+    console.log(`  \x1b[32m${done} done\x1b[0m, \x1b[31m${failed} failed\x1b[0m of ${filteredTasks.length} tasks`);
     console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
+    printQAReports();
+    process.exit(1);
   }
 
-  process.exit(failed > 0 ? 1 : 0);
+  console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
+  console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
+  printQAReports();
+
+  process.exit(0);
 }
 
 main().catch(e => {
-  process.stdout.write(SHOW_CURSOR);
+  if (isTTY()) process.stdout.write(SHOW_CURSOR);
   console.error(e);
   process.exit(1);
 });

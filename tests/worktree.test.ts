@@ -78,15 +78,21 @@ beforeEach(() => {
 
 describe("setupFeatureBranch", () => {
   it("creates new branch if it doesn't exist", () => {
-    // First call: rev-parse throws (branch doesn't exist)
-    mockExec.mockImplementationOnce(() => {
-      throw new Error("not a valid ref");
-    });
-    // Second call: checkout -b succeeds
-    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExec
+      // rev-parse HEAD succeeds (has commits)
+      .mockReturnValueOnce(Buffer.from("abc123"))
+      // rev-parse --verify branch throws (branch doesn't exist)
+      .mockImplementationOnce(() => { throw new Error("not a valid ref"); })
+      // checkout -b succeeds
+      .mockReturnValueOnce(Buffer.from(""));
 
     setupFeatureBranch("feat/cool", false);
 
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "HEAD"],
+      expect.anything(),
+    );
     expect(mockExec).toHaveBeenCalledWith(
       "git",
       ["rev-parse", "--verify", "feat/cool"],
@@ -100,10 +106,13 @@ describe("setupFeatureBranch", () => {
   });
 
   it("checks out existing branch", () => {
-    // rev-parse succeeds (branch exists)
-    mockExec.mockReturnValueOnce(Buffer.from("abc123"));
-    // checkout succeeds
-    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExec
+      // rev-parse HEAD succeeds
+      .mockReturnValueOnce(Buffer.from("abc123"))
+      // rev-parse --verify branch succeeds
+      .mockReturnValueOnce(Buffer.from("def456"))
+      // checkout succeeds
+      .mockReturnValueOnce(Buffer.from(""));
 
     setupFeatureBranch("feat/cool", false);
 
@@ -116,6 +125,43 @@ describe("setupFeatureBranch", () => {
       "git",
       ["checkout", "feat/cool"],
       expect.anything(),
+    );
+  });
+
+  it("creates initial commit on unborn HEAD", () => {
+    mockExec
+      // rev-parse HEAD throws (unborn HEAD)
+      .mockImplementationOnce(() => { throw new Error("unknown revision HEAD"); })
+      // commit --allow-empty succeeds
+      .mockReturnValueOnce(Buffer.from(""))
+      // rev-parse --verify branch throws (branch doesn't exist)
+      .mockImplementationOnce(() => { throw new Error("not a valid ref"); })
+      // checkout -b succeeds
+      .mockReturnValueOnce(Buffer.from(""));
+
+    setupFeatureBranch("feat/cool", false);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["commit", "--allow-empty", "-m", "chore: initial commit"],
+      expect.anything(),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["checkout", "-b", "feat/cool"],
+      expect.anything(),
+    );
+  });
+
+  it("throws clear error when initial commit fails (e.g. missing git config)", () => {
+    mockExec
+      // rev-parse HEAD throws (unborn HEAD)
+      .mockImplementationOnce(() => { throw new Error("unknown revision HEAD"); })
+      // commit --allow-empty also throws (no git user configured)
+      .mockImplementationOnce(() => { throw new Error("Please tell me who you are"); });
+
+    expect(() => setupFeatureBranch("feat/cool", false)).toThrow(
+      /Cannot create initial commit.*git user\.name\/email configured/,
     );
   });
 });
@@ -201,6 +247,37 @@ describe("cleanupWorktree", () => {
       cleanupWorktree("my-proj", 2, "feat/cool", false),
     ).not.toThrow();
   });
+
+  it("preserves task branch when preserveBranch is true", () => {
+    mockExec.mockReturnValue(Buffer.from(""));
+
+    cleanupWorktree("my-proj", 2, "feat/cool", false, { preserveBranch: true });
+
+    // Worktree should still be removed
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "remove", "/tmp/liteboard-my-proj-t2", "--force"],
+      expect.anything(),
+    );
+    // Branch should NOT be deleted
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "git",
+      ["branch", "-D", "feat/cool-t2"],
+      expect.anything(),
+    );
+  });
+
+  it("deletes task branch when preserveBranch is false", () => {
+    mockExec.mockReturnValue(Buffer.from(""));
+
+    cleanupWorktree("my-proj", 2, "feat/cool", false, { preserveBranch: false });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["branch", "-D", "feat/cool-t2"],
+      expect.anything(),
+    );
+  });
 });
 
 // ─── cleanupAllWorktrees ────────────────────────────────────────────────────
@@ -229,6 +306,36 @@ describe("cleanupAllWorktrees", () => {
         expect.anything(),
       );
     }
+  });
+
+  it("preserves branches of merge-failed tasks when preserveFailedBranches is true", () => {
+    const tasks: Task[] = [
+      makeTask({ id: 1, status: "done", lastLine: "" }),
+      makeTask({ id: 2, status: "failed", lastLine: "[MERGE FAILED] conflict in src/index.ts" }),
+      makeTask({ id: 3, status: "failed", lastLine: "[EXIT 1]" }),
+    ];
+    mockExec.mockReturnValue(Buffer.from(""));
+
+    cleanupAllWorktrees(tasks, "proj", "feat/x", false, { preserveFailedBranches: true });
+
+    // Task 1 (done): branch should be deleted
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["branch", "-D", "feat/x-t1"],
+      expect.anything(),
+    );
+    // Task 2 (merge-failed): branch should be preserved
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "git",
+      ["branch", "-D", "feat/x-t2"],
+      expect.anything(),
+    );
+    // Task 3 (failed but NOT merge failure): branch should be deleted
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["branch", "-D", "feat/x-t3"],
+      expect.anything(),
+    );
   });
 });
 

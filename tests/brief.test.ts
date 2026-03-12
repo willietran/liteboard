@@ -19,7 +19,8 @@ vi.mock("../src/memory.js", () => ({
 import { readFileSync } from "node:fs";
 import { readMemorySnapshot } from "../src/memory.js";
 import { buildBrief } from "../src/brief.js";
-import type { Task } from "../src/types.js";
+import type { Task, ModelConfig, Provider } from "../src/types.js";
+import { defaultModelConfig } from "../src/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ const STUB_COMMANDS: Record<string, string> = {
   "receiving-code-review.md": "# Receiving Code Review\nProcess feedback methodically.",
   "code-reviewer.md": "# Code Reviewer\nEvaluate code against criteria.",
   "quality-standards.md": "# Quality Standards\nEvery task must satisfy these standards.",
+  "verification.md": "# Verification\nRun `npx tsc --noEmit`, `npm run build`, `npm test` in a verification loop.",
+  "qa-agent.md": "# QA Agent\nYou are a QA validation agent.",
 };
 
 function stubReadFileSync() {
@@ -80,6 +83,21 @@ function makeDepTask(overrides: Partial<Task> = {}): Task {
     lastLine: "",
     bytesReceived: 1000,
     ...overrides,
+  };
+}
+
+function mockProvider(): Provider {
+  return {
+    name: "claude",
+    spawn: vi.fn() as any,
+    parseStream: vi.fn() as any,
+    createStreamParser: vi.fn() as any,
+    healthCheck: vi.fn() as any,
+    subagentModelHint(fullModel: string): string {
+      if (fullModel.includes("opus")) return "opus";
+      if (fullModel.includes("haiku")) return "haiku";
+      return "sonnet";
+    },
   };
 }
 
@@ -261,12 +279,167 @@ describe("buildBrief", () => {
     expect(brief).toContain("BLOCKING violation");
   });
 
-  it("includes verification commands in rules section", () => {
+  it("includes verification phase between implement and code review", () => {
     const task = makeTask();
     const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
 
     expect(brief).toContain("tsc --noEmit");
     expect(brief).toContain("npm run build");
     expect(brief).toContain("npm test");
+
+    // Verification phase is properly numbered and ordered
+    expect(brief).toContain("Phase 5: Verify");
+    expect(brief).toContain("Phase 6: Code Review");
+    const verifyIdx = brief.indexOf("Phase 5: Verify");
+    const codeReviewIdx = brief.indexOf("Phase 6: Code Review");
+    expect(verifyIdx).toBeLessThan(codeReviewIdx);
+
+    // Verification commands come from the verification phase, not the rules section
+    const rulesIdx = brief.indexOf("## Rules");
+    expect(brief.indexOf("tsc --noEmit")).toBeLessThan(rulesIdx);
+  });
+
+  it("includes artifacts path for memory entry in rules", () => {
+    const task = makeTask({ id: 13 });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("/fake/project/artifacts/t13-memory-entry.md");
+  });
+
+  it("instructs agents to save artifacts outside repo root", () => {
+    const task = makeTask();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("never to the repo root");
+  });
+});
+
+// ─── QA brief ────────────────────────────────────────────────────────────────
+
+describe("buildBrief for QA tasks", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("includes qa-agent.md content for type: qa", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("# QA Agent");
+    expect(brief).toContain("You are a QA validation agent.");
+  });
+
+  it("includes dependent task requirements", () => {
+    const depTask = makeDepTask({
+      id: 10,
+      title: "Add auth",
+      creates: ["src/auth.ts"],
+      modifies: ["src/app.ts"],
+      requirements: ["User can sign up", "User can log in"],
+    });
+    const qaTask = makeTask({ id: 20, type: "qa", dependsOn: [10] });
+    const allTasks = [depTask, qaTask];
+
+    const brief = buildBrief(qaTask, allTasks, "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("Task 10: Add auth");
+    expect(brief).toContain("User can sign up");
+    expect(brief).toContain("User can log in");
+    expect(brief).toContain("`src/auth.ts`");
+    expect(brief).toContain("`src/app.ts`");
+  });
+
+  it("does NOT include plan-review or session-review workflow phases", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).not.toContain("# Plan Review");
+    expect(brief).not.toContain("# Session Review");
+    expect(brief).not.toContain("Phase 1-2");
+    expect(brief).not.toContain("Phase 3: Implement");
+    expect(brief).not.toContain("Phase 4: Code Review");
+  });
+
+  it("includes agent-orientation and quality-standards", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("# Agent Orientation");
+    expect(brief).toContain("# Quality Standards");
+  });
+
+  it("identifies itself as QA agent in task context", () => {
+    const task = makeTask({ id: 5, title: "Validate integration", type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("QA agent");
+    expect(brief).toContain("Task 5: Validate integration");
+  });
+
+  it("includes qa-report artifact path in rules", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("/fake/project/artifacts/t13-qa-report.md");
+    expect(brief).toContain("markdown table");
+  });
+
+  it("includes artifacts path for memory entry in rules", () => {
+    const task = makeTask({ id: 20, type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("/fake/project/artifacts/t20-memory-entry.md");
+  });
+
+  it("instructs agents to save artifacts outside repo root", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    expect(brief).toContain("never to the repo root");
+  });
+});
+
+// ─── Sub-Agent Model Injection ──────────────────────────────────────────────
+
+describe("buildBrief sub-agent model injection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("includes Sub-Agent Models section in implementation briefs", () => {
+    const task = makeTask();
+    const models = defaultModelConfig();
+    const provider = mockProvider();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+
+    expect(brief).toContain("## Sub-Agent Models");
+    expect(brief).toContain('Explore sub-agents: model: "sonnet"');
+    expect(brief).toContain('Plan Review sub-agents: model: "opus"');
+    expect(brief).toContain('Code Review sub-agents: model: "sonnet"');
+  });
+
+  it("includes Sub-Agent Models section in QA briefs with fixer hint only", () => {
+    const task = makeTask({ type: "qa" });
+    const models = defaultModelConfig();
+    const provider = mockProvider();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+
+    expect(brief).toContain("## Sub-Agent Models");
+    expect(brief).toContain('Fixer sub-agents: model: "opus"');
+    expect(brief).not.toContain("Explore sub-agents");
+    expect(brief).not.toContain("Plan Review sub-agents");
+    expect(brief).not.toContain("Code Review sub-agents");
+  });
+
+  it("uses custom model hints when config overrides defaults", () => {
+    const task = makeTask();
+    const models = defaultModelConfig();
+    models.explore = { provider: "claude", model: "claude-haiku-4-5-20251001" };
+    const provider = mockProvider();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+
+    expect(brief).toContain('Explore sub-agents: model: "haiku"');
+    expect(brief).toContain('Plan Review sub-agents: model: "opus"');
+  });
+
+  it("omits Sub-Agent Models section when models/provider not provided", () => {
+    const task = makeTask();
+    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).not.toContain("## Sub-Agent Models");
   });
 });

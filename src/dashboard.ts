@@ -7,6 +7,25 @@ export const CLEAR_SCREEN = "\x1b[2J";
 const CURSOR_HOME = "\x1b[H";
 const CLEAR_TO_EOL = "\x1b[K";
 const CLEAR_BELOW = "\x1b[J";
+
+let forcePipeMode = false;
+
+export function setForcePipeMode(value: boolean): void {
+  forcePipeMode = value;
+}
+
+export function isTTY(): boolean {
+  // --no-tui flag: guaranteed override for any environment
+  if (forcePipeMode) return false;
+  // LITEBOARD_NO_TUI=1: env-var override for programmatic invocations
+  if (process.env.LITEBOARD_NO_TUI === "1") return false;
+  // Claude Code's background task runner allocates a full PTY (both stdin
+  // and stdout report isTTY=true), but reads the raw byte stream — not a
+  // terminal screen buffer. Cursor-positioning escapes corrupt the output.
+  if (process.env.CLAUDECODE === "1") return false;
+  return !!process.stdout.isTTY && !!process.stdin.isTTY;
+}
+
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
@@ -16,14 +35,15 @@ const YELLOW = "\x1b[33m";
 const CYAN = "\x1b[36m";
 const GRAY = "\x1b[90m";
 
+function formatSeconds(totalSeconds: number): string {
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
 function formatElapsed(startedAt?: string): string {
   if (!startedAt) return "0:00";
-  const elapsed = Math.floor(
-    (Date.now() - new Date(startedAt).getTime()) / 1000,
-  );
-  const mins = Math.floor(elapsed / 60);
-  const secs = elapsed % 60;
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
+  return formatSeconds(Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
 }
 
 function truncate(s: string, maxLen: number): string {
@@ -102,10 +122,16 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
     `${DIM}Logs: ${projectDir}/logs/t<N>.jsonl  (tail -f to watch)${RESET}`,
   );
 
-  // Render: content first, then clear-to-EOL — matches docs/run.ts pattern
-  const output = CURSOR_HOME
-    + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
-    + "\n"
-    + CLEAR_BELOW;
-  process.stdout.write(output);
+  if (isTTY()) {
+    const output = CURSOR_HOME
+      + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
+      + "\n"
+      + CLEAR_BELOW;
+    process.stdout.write(output);
+  } else {
+    for (const line of lines) {
+      console.log(line);
+    }
+  }
 }
+

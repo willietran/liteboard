@@ -89,7 +89,7 @@ beforeEach(() => {
 describe("spawnAgent", () => {
   // ── 1. Writes brief to temp file ────────────────────────────────────────
 
-  it("writes brief to .brief-t<id>.md in worktree path", () => {
+  it("writes brief to artifacts directory instead of worktree", () => {
     const task = makeTask({ id: 3 });
     const child = makeMockChild();
     const provider = makeMockProvider(child);
@@ -97,7 +97,7 @@ describe("spawnAgent", () => {
     spawnAgent(task, "Do the thing", provider, "sonnet", "/tmp/wp", "/proj", false);
 
     expect(mockWriteFileSync).toHaveBeenCalledWith(
-      "/tmp/wp/.brief-t3.md",
+      "/proj/artifacts/t3-brief.md",
       "Do the thing",
       "utf-8",
     );

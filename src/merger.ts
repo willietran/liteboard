@@ -3,10 +3,7 @@ import * as fs from "node:fs";
 import { git } from "./git.js";
 import { createMutex } from "./mutex.js";
 import { getErrorMessage, getErrorStderr } from "./errors.js";
-
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-const NPM_TIMEOUT_MS = 120_000;
+import { runBuildValidation, NPM_TIMEOUT_MS } from "./build-validation.js";
 
 // ─── Merge serialization lock ────────────────────────────────────────────────
 
@@ -42,19 +39,28 @@ export async function squashMerge(
   return serialize(async () => {
     const taskBranch = `${featureBranch}-t${taskId}`;
     try {
+      // Guard: reset current HEAD if dirty (may be on any branch after a crash).
+      // A prior failed merge may have left MERGE_HEAD, staged changes, or
+      // an in-progress merge/rebase state on the current or a task branch.
+      const status = git(["status", "--porcelain"], { verbose });
+      if (status.length > 0) {
+        console.error(`[merger] dirty index detected before merge for task ${taskId}, resetting`);
+        try { git(["merge", "--abort"], { verbose }); } catch {}
+        try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
+      }
+
       // Resolve repo root so npm commands run from the right directory
       const repoRoot = git(["rev-parse", "--show-toplevel"], { verbose });
 
       // Step 1: Trial merge — checkout feature branch and attempt squash merge
       git(["checkout", featureBranch], { verbose });
 
-      // Remove ephemeral files from disk
-      try {
-        fs.unlinkSync(".memory-entry.md");
-      } catch {}
-      try {
-        fs.unlinkSync(`.brief-t${taskId}.md`);
-      } catch {}
+      // Defense-in-depth: clean up ephemeral files that agents may have committed
+      // to the task branch despite being instructed to write to the artifacts directory.
+      const ephemeralFiles = [".memory-entry.md", `.brief-t${taskId}.md`, ".qa-report.md"];
+      for (const f of ephemeralFiles) {
+        try { fs.unlinkSync(f); } catch {}
+      }
 
       try {
         git(["merge", "--squash", "--no-commit", taskBranch], { verbose });
@@ -85,7 +91,9 @@ export async function squashMerge(
             git(["add", "package-lock.json"], { verbose });
           } else {
             // Other conflicts — abort, squash task branch, rebase, retry
-            git(["merge", "--abort"], { verbose });
+            // --squash does not create MERGE_HEAD, so merge --abort won't work.
+            // reset --hard restores the feature branch to its pre-merge state.
+            git(["reset", "--hard", "HEAD"], { verbose });
 
             // Squash task branch to a single commit
             git(["checkout", taskBranch], { verbose });
@@ -108,7 +116,7 @@ export async function squashMerge(
           }
         } catch (resolveErr) {
           try {
-            git(["merge", "--abort"], { verbose });
+            git(["reset", "--hard", "HEAD"], { verbose });
           } catch {}
           try {
             git(["checkout", featureBranch], { verbose });
@@ -117,89 +125,45 @@ export async function squashMerge(
         }
       }
 
-      // Remove ephemeral files from staging before commit
+      // Remove ephemeral files from staging and disk before commit
       try {
-        git(
-          ["reset", "HEAD", "--", ".memory-entry.md", `.brief-t${taskId}.md`],
-          { verbose },
-        );
+        git(["reset", "HEAD", "--", ...ephemeralFiles], { verbose });
       } catch {}
+      for (const f of ephemeralFiles) {
+        try { fs.unlinkSync(f); } catch {}
+      }
 
       // Step 3: Validate — install deps (if needed) and run build
-      // Skip validation entirely for non-npm projects (no package.json)
-      const hasPkgJson = fs.existsSync(`${repoRoot}/package.json`);
-      if (hasPkgJson) {
-        try {
-          execFileSync("npm", ["install"], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
-            timeout: NPM_TIMEOUT_MS,
-          });
-        } catch (e: unknown) {
-          resetAndThrow(taskId, "Dependency installation", e, verbose);
-        }
+      const buildResult = runBuildValidation(repoRoot, { cleanInstall: false, timeout: NPM_TIMEOUT_MS });
 
-        // Stage lockfile in case npm install updated it
+      // Stage lockfile in case npm install updated it
+      if (fs.existsSync(`${repoRoot}/package.json`)) {
         try {
           git(["add", "package-lock.json"], { verbose });
         } catch {}
+      }
 
-        // 3b: Type check (fast fail before full build)
-        try {
-          execFileSync("npx", ["tsc", "--noEmit"], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
-            timeout: NPM_TIMEOUT_MS,
-          });
-        } catch (e: unknown) {
-          resetAndThrow(taskId, "Type check", e, verbose);
-        }
-
-        try {
-          execFileSync("npm", ["run", "build"], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
-            timeout: NPM_TIMEOUT_MS,
-          });
-        } catch (e: unknown) {
-          resetAndThrow(taskId, "Build validation", e, verbose);
-        }
-
-        // 3d: Run tests (only if a real test script is configured)
-        let hasTestScript = false;
-        try {
-          const pkg = JSON.parse(fs.readFileSync(`${repoRoot}/package.json`, "utf-8"));
-          hasTestScript = Boolean(pkg.scripts?.test &&
-            pkg.scripts.test !== 'echo "Error: no test specified" && exit 1');
-        } catch {
-          // Malformed package.json — skip test step, don't fail the merge for this
-        }
-        if (hasTestScript) {
-          try {
-            execFileSync("npm", ["test"], {
-              cwd: repoRoot,
-              stdio: "pipe",
-              encoding: "utf-8",
-              timeout: NPM_TIMEOUT_MS,
-            });
-          } catch (e: unknown) {
-            resetAndThrow(taskId, "Test suite", e, verbose);
-          }
-        }
+      if (!buildResult.success) {
+        const phaseLabels: Record<string, string> = {
+          install: "Dependency installation",
+          typecheck: "Type check",
+          build: "Build validation",
+          test: "Test suite",
+        };
+        const label = phaseLabels[buildResult.failedPhase] || buildResult.failedPhase;
+        resetAndThrow(taskId, label, new Error(buildResult.stderr || buildResult.error || "unknown error"), verbose);
       }
 
       // Step 4: Commit
       git(["commit", "-m", commitMessage], { verbose });
     } catch (e) {
-      try {
-        git(["merge", "--abort"], { verbose });
-      } catch {}
-      try {
-        git(["checkout", featureBranch], { verbose });
-      } catch {}
+      // Recovery: ensure feature branch is clean for the next queued merge.
+      // Note: resetAndThrow() already calls reset --hard for build failures,
+      // but this outer catch also handles commit failures, checkout failures,
+      // and other paths where reset hasn't run yet.
+      try { git(["merge", "--abort"], { verbose }); } catch {}
+      try { git(["checkout", featureBranch], { verbose }); } catch {}
+      try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
       throw e;
     }
   });

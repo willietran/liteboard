@@ -91,9 +91,18 @@ export function parseManifest(manifestPath: string): Task[] {
     const complexityStr = parseSingleValue(section, "Complexity Score");
     const complexity = complexityStr ? Number(complexityStr) : 0;
 
+    const typeStr = parseSingleValue(section, "Type").toLowerCase();
+    if (typeStr && typeStr !== "qa" && typeStr !== "implementation") {
+      console.error(
+        `\x1b[33mWarning: Task ${headers[i].id} has unrecognized Type "${typeStr}"\x1b[0m`,
+      );
+    }
+    const type = typeStr === "qa" ? "qa" as const : undefined;
+
     const task: Task = {
       id: headers[i].id,
       title: headers[i].title,
+      ...(type ? { type } : {}),
       creates: parseFileList(section, "Creates"),
       modifies: parseFileList(section, "Modifies"),
       dependsOn,

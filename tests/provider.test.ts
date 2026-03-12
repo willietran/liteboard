@@ -388,6 +388,26 @@ describe("ClaudeCodeProvider", () => {
     });
   });
 
+  // ── subagentModelHint ────────────────────────────────────────────────────
+
+  describe("subagentModelHint", () => {
+    it('returns "opus" for opus model IDs', () => {
+      expect(provider.subagentModelHint("claude-opus-4-6")).toBe("opus");
+    });
+
+    it('returns "sonnet" for sonnet model IDs', () => {
+      expect(provider.subagentModelHint("claude-sonnet-4-6")).toBe("sonnet");
+    });
+
+    it('returns "haiku" for haiku model IDs', () => {
+      expect(provider.subagentModelHint("claude-haiku-4-5-20251001")).toBe("haiku");
+    });
+
+    it('returns "sonnet" as fallback for unknown model IDs', () => {
+      expect(provider.subagentModelHint("unknown-model")).toBe("sonnet");
+    });
+  });
+
   // ── healthCheck ───────────────────────────────────────────────────────────
 
   describe("healthCheck", () => {

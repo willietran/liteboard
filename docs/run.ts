@@ -48,7 +48,7 @@ interface CLIArgs {
   manifestPath: string;
   designPath: string;
   concurrency: number;
-  model: string;
+  models: { implementation: { provider: string; model: string } };
   branch: string;
   taskFilter: number[] | null;
   dryRun: boolean;
@@ -76,7 +76,7 @@ Options:
   let manifestPath = "";
   let designPath = "";
   let concurrency = 1;
-  let model = "claude-opus-4-6";
+  let implModel = "claude-opus-4-6";
   let branch = "autoboard/build";
   let taskFilter: number[] | null = null;
   let dryRun = false;
@@ -88,7 +88,7 @@ Options:
     } else if (arg.startsWith("--concurrency=")) {
       concurrency = Math.max(1, Math.min(5, parseInt(arg.slice("--concurrency=".length), 10)));
     } else if (arg.startsWith("--model=")) {
-      model = arg.slice("--model=".length);
+      implModel = arg.slice("--model=".length);
     } else if (arg.startsWith("--branch=")) {
       branch = arg.slice("--branch=".length);
     } else if (arg.startsWith("--tasks=")) {
@@ -109,7 +109,7 @@ Options:
     manifestPath: path.resolve(manifestPath),
     designPath: path.resolve(designPath),
     concurrency,
-    model,
+    models: { implementation: { provider: "claude", model: implModel } },
     branch,
     taskFilter,
     dryRun,
@@ -1037,7 +1037,7 @@ async function main(): Promise<void> {
   log(`${BOLD}Autoboard Mini-MVP${RESET}`);
   log(`Manifest: ${args.manifestPath}`);
   log(`Design:   ${args.designPath}`);
-  log(`Model:    ${args.model}`);
+  log(`Model:    ${args.models.implementation.model}`);
   log(`Branch:   ${args.branch}`);
   log(`Parallel: ${args.concurrency}`);
   log("");
@@ -1307,7 +1307,7 @@ async function spawnTaskAgent(task: MiniTask, allTasks: MiniTask[], args: CLIArg
   task.worktreePath = wp;
 
   const brief = buildBrief(task, allTasks, args);
-  const child = spawnAgent(task, brief, args.model, wp, args.verbose);
+  const child = spawnAgent(task, brief, args.models.implementation.model, wp, args.verbose);
   task.process = child;
 
   // Timeout: kill if no bytes within 120s at startup, or no new bytes for 5 min mid-task
