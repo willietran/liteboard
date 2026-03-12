@@ -39,6 +39,63 @@ function inferExploreHints(task: Task, allTasks: Task[]): string[] {
   return [...new Set(hints)];
 }
 
+// ─── Shared Helpers ──────────────────────────────────────────────────────────
+
+/** Formats sub-agent model hint lines, handling Ollama's empty-hint case. */
+export function formatSubagentHints(
+  entries: { name: string; model: string }[],
+  providerName: string,
+  provider: Provider,
+): string[] {
+  return entries.map(({ name, model }) => {
+    const hint = provider.subagentModelHint(model, providerName);
+    if (hint) {
+      return `- ${name} sub-agents: model: "${hint}"`;
+    }
+    return `- ${name} sub-agents: (inherits parent model \u2014 do not specify a model parameter)`;
+  });
+}
+
+function appendSubagentModelsSection(
+  parts: string[],
+  entries: { name: string; model: string }[],
+  providerName: string,
+  models: ModelConfig | undefined,
+  provider: Provider | undefined,
+): void {
+  if (!models || !provider) return;
+  parts.push("## Sub-Agent Models");
+  parts.push("When spawning sub-agents via the Agent tool, use these model settings:");
+  parts.push(...formatSubagentHints(entries, providerName, provider));
+  parts.push("");
+}
+
+function appendMemorySnapshot(parts: string[], projectDir: string): void {
+  const memory = readMemorySnapshot(projectDir);
+  if (memory && /^## T\d+/m.test(memory)) {
+    parts.push("**Build Memory** (context from completed tasks):");
+    parts.push("```");
+    parts.push(memory.trim());
+    parts.push("```");
+    parts.push("");
+  }
+}
+
+function appendTaskDetails(parts: string[], task: Task): void {
+  parts.push("**Task details:**");
+  if (task.creates.length > 0)
+    parts.push(`- Creates: ${task.creates.map((f) => `\`${f}\``).join(", ")}`);
+  if (task.modifies.length > 0)
+    parts.push(`- Modifies: ${task.modifies.map((f) => `\`${f}\``).join(", ")}`);
+  if (task.requirements.length > 0) {
+    parts.push("- Requirements:");
+    for (const r of task.requirements) parts.push(`  - ${r}`);
+  }
+  parts.push("");
+}
+
+// ─── Backward-Compatible Dispatcher ──────────────────────────────────────────
+
 export function buildBrief(
   task: Task,
   allTasks: Task[],
@@ -49,57 +106,57 @@ export function buildBrief(
   models?: ModelConfig,
   provider?: Provider,
 ): string {
-  const slug = path.basename(projectDir);
-
-  // QA tasks get a specialized brief
   if (task.type === "qa") {
-    return buildQABrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, slug, models, provider);
+    return buildQABrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, models, provider);
   }
+  return buildImplementationBrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, models, provider);
+}
 
+// ─── Architect Brief ─────────────────────────────────────────────────────────
+
+export function buildArchitectBrief(
+  task: Task,
+  allTasks: Task[],
+  projectDir: string,
+  designPath: string,
+  manifestPath: string,
+  featureBranch: string,
+  models?: ModelConfig,
+  provider?: Provider,
+): string {
+  const slug = path.basename(projectDir);
+  const artDir = artifactsDir(projectDir);
   const parts: string[] = [];
 
-  // 1. Agent orientation
-  parts.push(readCommand("agent-orientation.md"));
+  // 1. Architect orientation
+  parts.push(readCommand("architect-orientation.md"));
   parts.push("");
 
-  // 1.5. Sub-agent model preferences
-  if (models && provider) {
-    parts.push("## Sub-Agent Models");
-    parts.push("When spawning sub-agents via the Agent tool, use these model settings:");
-    parts.push(`- Explore sub-agents: model: "${provider.subagentModelHint(models.architect.subagents.explore.model, "claude")}"`);
-    parts.push(`- Plan Review sub-agents: model: "${provider.subagentModelHint(models.architect.subagents.planReview.model, "claude")}"`);
-    parts.push(`- Code Review sub-agents: model: "${provider.subagentModelHint(models.implementation.subagents.codeReview.model, "claude")}"`);
-    parts.push("");
-  }
+  // 2. Sub-agent model hints (explore + planReview)
+  appendSubagentModelsSection(parts, [
+    { name: "Explore", model: models?.architect.subagents.explore?.model ?? "" },
+    { name: "Plan Review", model: models?.architect.subagents.planReview?.model ?? "" },
+  ], models?.architect.provider ?? "claude", models, provider);
 
-  // 1.75. Quality standards
+  // 3. Quality standards
   parts.push(readCommand("quality-standards.md"));
   parts.push("");
 
-  // 2. Task context
-  parts.push(`---`);
-  parts.push(
-    `I'm implementing **Task ${task.id}: ${task.title}** for the **${slug}** project.`,
-  );
+  // 4. Task context
+  parts.push("---");
+  parts.push(`I'm planning **Task ${task.id}: ${task.title}** for the **${slug}** project.`);
   parts.push("");
 
-  // 3. Design doc + manifest paths
+  // 5. Reference docs
   parts.push("**Reference documents** (read these first):");
   parts.push(`- Design doc: \`${designPath}\``);
   parts.push(`- Task manifest: \`${manifestPath}\``);
   parts.push("");
 
-  // 4. Memory snapshot
-  const memory = readMemorySnapshot(projectDir);
-  if (memory && /^## T\d+/m.test(memory)) {
-    parts.push("**Build Memory** (context from completed tasks):");
-    parts.push("```");
-    parts.push(memory.trim());
-    parts.push("```");
-    parts.push("");
-  }
+  // 6. Memory snapshot
+  appendMemorySnapshot(parts, projectDir);
 
-  // 5. Explore hints
+  // 7. Explore hints
   const hints = inferExploreHints(task, allTasks);
   if (hints.length > 0) {
     parts.push("**Explore hints:**");
@@ -107,40 +164,109 @@ export function buildBrief(
     parts.push("");
   }
 
-  // 6. Task details
-  parts.push("**Task details:**");
-  if (task.creates.length > 0)
-    parts.push(
-      `- Creates: ${task.creates.map((f) => `\`${f}\``).join(", ")}`,
-    );
-  if (task.modifies.length > 0)
-    parts.push(
-      `- Modifies: ${task.modifies.map((f) => `\`${f}\``).join(", ")}`,
-    );
-  if (task.requirements.length > 0) {
-    parts.push("- Requirements:");
-    for (const r of task.requirements) parts.push(`  - ${r}`);
-  }
-  parts.push("");
+  // 8. Task details
+  appendTaskDetails(parts, task);
 
-  // 7. Workflow phases with embedded commands
+  // 9. Workflow: plan review with supporting documents
   parts.push("---");
   parts.push("## Workflow");
   parts.push("");
-  parts.push("### Phase 1-3: Explore & Plan, then Plan Review");
+  parts.push("### Plan Review");
   parts.push(readCommand("plan-review.md"));
   parts.push("");
-  parts.push("### Phase 4: Implement");
+  parts.push("### How to process review feedback:");
+  parts.push(readCommand("receiving-code-review.md"));
+  parts.push("");
+  parts.push("### Review criteria:");
+  parts.push(readCommand("code-reviewer.md"));
+  parts.push("");
+
+  // 10. Plan output instruction
+  parts.push("### Plan Output");
+  parts.push(`Write your approved plan to \`${artDir}/t${task.id}-task-plan.md\`.`);
+  parts.push("");
+
+  // 11. Rules
+  parts.push("---");
+  parts.push("## Rules");
+  parts.push(`- **Feature branch**: \`${featureBranch}\``);
+  parts.push("- Do NOT touch files unrelated to this task");
+  parts.push("- Do NOT push to remote");
+  parts.push("- Do NOT write implementation code — your output is a plan, not a diff");
+  parts.push("- Do NOT commit — your output is a plan file only");
+  parts.push(`- Write your memory entry to \`${artDir}/t${task.id}-memory-entry.md\` as your final step`);
+  parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
+  parts.push("");
+
+  return parts.join("\n");
+}
+
+// ─── Implementation Brief ────────────────────────────────────────────────────
+
+export function buildImplementationBrief(
+  task: Task,
+  allTasks: Task[],
+  projectDir: string,
+  designPath: string,
+  manifestPath: string,
+  featureBranch: string,
+  models?: ModelConfig,
+  provider?: Provider,
+): string {
+  const slug = path.basename(projectDir);
+  const artDir = artifactsDir(projectDir);
+  const parts: string[] = [];
+
+  // 1. Agent orientation (implement/verify/review phases)
+  parts.push(readCommand("agent-orientation.md"));
+  parts.push("");
+
+  // 2. Sub-agent model hints (codeReview only)
+  appendSubagentModelsSection(parts, [
+    { name: "Code Review", model: models?.implementation.subagents.codeReview?.model ?? "" },
+  ], models?.implementation.provider ?? "claude", models, provider);
+
+  // 3. Quality standards
+  parts.push(readCommand("quality-standards.md"));
+  parts.push("");
+
+  // 4. Task context
+  parts.push("---");
+  parts.push(`I'm implementing **Task ${task.id}: ${task.title}** for the **${slug}** project.`);
+  parts.push("");
+
+  // 5. Reference docs
+  parts.push("**Reference documents** (read these first):");
+  parts.push(`- Design doc: \`${designPath}\``);
+  parts.push(`- Task manifest: \`${manifestPath}\``);
+  parts.push("");
+
+  // 6. Plan read instruction
+  parts.push(`**Task plan** (read before implementing):`);
+  parts.push(`- Read the approved plan from \`${artDir}/t${task.id}-task-plan.md\``);
+  parts.push("");
+
+  // 7. Memory snapshot
+  appendMemorySnapshot(parts, projectDir);
+
+  // 8. Task details
+  appendTaskDetails(parts, task);
+
+  // 9. Workflow: implement → verify → code review
+  parts.push("---");
+  parts.push("## Workflow");
+  parts.push("");
+  parts.push("### Phase 1: Implement");
   if (task.tddPhase && task.tddPhase !== "Exempt") {
     parts.push(`This is a TDD task (${task.tddPhase}). Write a failing test first, verify it fails (RED), then write the minimum implementation to make it pass (GREEN), then refactor. Verify the test suite after each step. Skipping RED verification or writing implementation before tests is a **BLOCKING violation**.`);
   } else {
     parts.push("This task is **TDD-Exempt**. Tests are encouraged but not required first.");
   }
   parts.push("");
-  parts.push("### Phase 5: Verify");
+  parts.push("### Phase 2: Verify");
   parts.push(readCommand("verification.md"));
   parts.push("");
-  parts.push("### Phase 6: Code Review");
+  parts.push("### Phase 3: Code Review");
   parts.push(readCommand("session-review.md"));
   parts.push("");
   parts.push("### How to process review feedback:");
@@ -150,16 +276,13 @@ export function buildBrief(
   parts.push(readCommand("code-reviewer.md"));
   parts.push("");
 
-  // 8. Commit message + rules
+  // 10. Commit message + rules
   parts.push("---");
   parts.push("## Rules");
-  parts.push(
-    `- **Commit message** (use exactly): \`${task.commitMessage}\``,
-  );
+  parts.push(`- **Commit message** (use exactly): \`${task.commitMessage}\``);
   parts.push(`- **Feature branch**: \`${featureBranch}\``);
   parts.push("- Do NOT touch files unrelated to this task");
   parts.push("- Do NOT push to remote");
-  const artDir = artifactsDir(projectDir);
   parts.push(`- Write your memory entry to \`${artDir}/t${task.id}-memory-entry.md\` as your final step before committing`);
   parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
   parts.push("");
@@ -167,7 +290,7 @@ export function buildBrief(
   return parts.join("\n");
 }
 
-// ─── QA Brief ─────────────────────────────────────────────────────────────────
+// ─── QA Brief ────────────────────────────────────────────────────────────────
 
 function buildQABrief(
   task: Task,
@@ -176,49 +299,39 @@ function buildQABrief(
   designPath: string,
   manifestPath: string,
   featureBranch: string,
-  slug: string,
   models?: ModelConfig,
   provider?: Provider,
 ): string {
+  const slug = path.basename(projectDir);
   const parts: string[] = [];
 
-  // 1. Agent orientation + quality standards (same as impl tasks)
+  // 1. Agent orientation + quality standards
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
 
-  // 1.5. Sub-agent model preferences
-  if (models && provider) {
-    parts.push("## Sub-Agent Models");
-    parts.push("When spawning sub-agents via the Agent tool, use these model settings:");
-    parts.push(`- Fixer sub-agents: model: "${provider.subagentModelHint(models.qa.subagents.qaFixer.model, "claude")}"`);
-    parts.push("");
-  }
+  // 2. Sub-agent model hints (qaFixer only)
+  appendSubagentModelsSection(parts, [
+    { name: "Fixer", model: models?.qa.subagents.qaFixer?.model ?? "" },
+  ], models?.qa.provider ?? "claude", models, provider);
 
   parts.push(readCommand("quality-standards.md"));
   parts.push("");
 
-  // 2. Task context
+  // 3. Task context
   parts.push("---");
   parts.push(`I'm the **QA agent** for **Task ${task.id}: ${task.title}** in the **${slug}** project.`);
   parts.push("");
 
-  // 3. Reference docs
+  // 4. Reference docs
   parts.push("**Reference documents** (read these first):");
   parts.push(`- Design doc: \`${designPath}\``);
   parts.push(`- Task manifest: \`${manifestPath}\``);
   parts.push("");
 
-  // 4. Memory snapshot
-  const memory = readMemorySnapshot(projectDir);
-  if (memory && /^## T\d+/m.test(memory)) {
-    parts.push("**Build Memory** (context from completed tasks):");
-    parts.push("```");
-    parts.push(memory.trim());
-    parts.push("```");
-    parts.push("");
-  }
+  // 5. Memory snapshot
+  appendMemorySnapshot(parts, projectDir);
 
-  // 5. Dependency task details (what changed and what to validate)
+  // 6. Dependency task details
   const depTasks = task.dependsOn
     .map(id => allTasks.find(t => t.id === id))
     .filter((t): t is Task => t !== undefined);
@@ -244,14 +357,14 @@ function buildQABrief(
     }
   }
 
-  // 6. QA workflow (replaces standard plan-review/implement/code-review phases)
+  // 7. QA workflow
   parts.push("---");
   parts.push("## Workflow");
   parts.push("");
   parts.push(readCommand("qa-agent.md"));
   parts.push("");
 
-  // 7. Rules
+  // 8. Rules
   parts.push("---");
   parts.push("## Rules");
   parts.push(`- **Commit message** (use exactly): \`${task.commitMessage}\``);
