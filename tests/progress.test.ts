@@ -34,6 +34,7 @@ function makeTask(overrides: Partial<Task> & { id: number; title: string }): Tas
     modifies: [],
     dependsOn: [],
     requirements: [],
+    explore: [],
     tddPhase: "GREEN",
     commitMessage: `implement task ${overrides.id}`,
     complexity: 1,
@@ -113,6 +114,36 @@ describe("writeProgress", () => {
     const [, content] = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0];
     const text = content as string;
     expect(text).toContain("Error: something went wrong");
+  });
+
+  it("includes failure summary for needs_human tasks", () => {
+    const tasks: Task[] = [
+      makeTask({
+        id: 1,
+        title: "Stuck task",
+        status: "needs_human",
+        lastLine: "Triage escalated: cannot resolve merge conflict",
+      }),
+    ];
+
+    writeProgress(tasks, "/fake/project");
+
+    const [, content] = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0];
+    const text = content as string;
+    expect(text).toContain("| needs_human |");
+    expect(text).toContain("Triage escalated: cannot resolve merge conflict");
+  });
+
+  it("writes merging status verbatim", () => {
+    const tasks: Task[] = [
+      makeTask({ id: 1, title: "Merging task", status: "merging" }),
+    ];
+
+    writeProgress(tasks, "/fake/project");
+
+    const [, content] = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0];
+    const text = content as string;
+    expect(text).toContain("| merging |");
   });
 });
 
@@ -201,6 +232,80 @@ describe("readProgress", () => {
 
     expect(result).toBeInstanceOf(Map);
     expect(result.size).toBe(0);
+  });
+});
+
+// ─── readProgress — needs_human and merging resume behavior ─────────────────
+
+describe("readProgress — needs_human and merging resume behavior", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("includes needs_human tasks in result map (not re-queued on resume)", () => {
+    (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
+      [
+        "| Task | Title | Status | Completed At | Failure Summary |",
+        "| --- | --- | --- | --- | --- |",
+        "| 1 | Done task | done | 2026-03-13T08:00:00Z | |",
+        "| 2 | Stuck task | needs_human | | Escalated: merge conflict |",
+      ].join("\n"),
+    );
+
+    const result = readProgress("/fake/project");
+
+    expect(result.has(1)).toBe(true);
+    expect(result.has(2)).toBe(true);
+  });
+
+  it("does not include merging tasks in result map (re-queued on resume)", () => {
+    (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
+      [
+        "| Task | Title | Status | Completed At | Failure Summary |",
+        "| --- | --- | --- | --- | --- |",
+        "| 1 | Merging task | merging | | |",
+        "| 2 | Done task | done | 2026-03-13T08:00:00Z | |",
+      ].join("\n"),
+    );
+
+    const result = readProgress("/fake/project");
+
+    expect(result.has(1)).toBe(false);  // merging → re-queued
+    expect(result.has(2)).toBe(true);   // done → preserved
+  });
+
+  it("does not include failed tasks in result map (re-queued on resume)", () => {
+    (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
+      [
+        "| Task | Title | Status | Completed At | Failure Summary |",
+        "| --- | --- | --- | --- | --- |",
+        "| 1 | Failed task | failed | | Error happened |",
+      ].join("\n"),
+    );
+
+    const result = readProgress("/fake/project");
+
+    expect(result.has(1)).toBe(false);  // failed → re-queued
+  });
+
+  it("needs_human task uses 'needs_human' sentinel as completedAt in the map", () => {
+    (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
+      [
+        "| Task | Title | Status | Completed At | Failure Summary |",
+        "| --- | --- | --- | --- | --- |",
+        "| 5 | Escalated | needs_human | | Agent failed 3 times |",
+      ].join("\n"),
+    );
+
+    const result = readProgress("/fake/project");
+
+    expect(result.has(5)).toBe(true);
+    // Sentinel value — T8 resume logic checks: if value === "needs_human", restore as needs_human not done
+    expect(result.get(5)).toBe("needs_human");
   });
 });
 

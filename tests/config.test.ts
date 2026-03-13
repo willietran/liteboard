@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { ProjectConfig, OllamaConfig } from "../src/types.js";
+import type { ProjectConfig, OllamaConfig, SimpleAgentConfig } from "../src/types.js";
 import { defaultModelConfig } from "../src/types.js";
 
 // Mock node:fs before importing the module under test
@@ -55,7 +55,7 @@ function validConfigJson(overrides: Record<string, unknown> = {}): string {
 
 /** Returns a ProjectConfig with all defaults. */
 function defaultProjectConfig(): ProjectConfig {
-  return { agents: defaultModelConfig(), concurrency: 1 };
+  return { agents: defaultModelConfig(), concurrency: 1, triage: { provider: "claude", model: "claude-sonnet-4-6" } };
 }
 
 /** Returns a ProjectConfig with some ollama agents for testing. */
@@ -186,6 +186,78 @@ describe("parseProjectConfig", () => {
       expect(result.concurrency).toBe(4);
       expect(result.branch).toBe("old-branch");
       expect(result.ollama).toEqual({ baseUrl: "http://old:11434", fallback: false });
+    });
+  });
+
+  describe("triage config", () => {
+    it("parses triage config from agents.triage in config.json", () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(JSON.stringify({
+        agents: {
+          triage: { provider: "claude", model: "claude-opus-4-6" },
+        },
+      }));
+
+      const result = parseProjectConfig("/path/to/config.json");
+
+      expect(result.triage).toEqual({ provider: "claude", model: "claude-opus-4-6" });
+    });
+
+    it("applies defaults when triage is absent from config", () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(validConfigJson());
+
+      const result = parseProjectConfig("/path/to/config.json");
+
+      expect(result.triage).toEqual({ provider: "claude", model: "claude-sonnet-4-6" });
+    });
+
+    it("triage config does not appear in config.agents (kept separate)", () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(JSON.stringify({
+        agents: {
+          triage: { provider: "claude", model: "claude-sonnet-4-6" },
+        },
+      }));
+
+      const result = parseProjectConfig("/path/to/config.json");
+
+      expect(Object.keys(result.agents)).toEqual(["architect", "implementation", "qa"]);
+      expect((result.agents as Record<string, unknown>).triage).toBeUndefined();
+    });
+
+    it("applies defaults when config file is missing", () => {
+      mockExistsSync.mockReturnValue(false);
+
+      const result = parseProjectConfig("/path/to/config.json");
+
+      expect(result.triage).toEqual({ provider: "claude", model: "claude-sonnet-4-6" });
+    });
+
+    it("allows partial triage override (model only)", () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(JSON.stringify({
+        agents: {
+          triage: { model: "claude-opus-4-6" },
+        },
+      }));
+
+      const result = parseProjectConfig("/path/to/config.json");
+
+      expect(result.triage).toEqual({ provider: "claude", model: "claude-opus-4-6" });
+    });
+
+    it("allows partial triage override (provider only)", () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(JSON.stringify({
+        agents: {
+          triage: { provider: "ollama" },
+        },
+      }));
+
+      const result = parseProjectConfig("/path/to/config.json");
+
+      expect(result.triage).toEqual({ provider: "ollama", model: "claude-sonnet-4-6" });
     });
   });
 
@@ -323,6 +395,56 @@ describe("validateConfig", () => {
     });
   });
 
+  describe("triage validation", () => {
+    it("does not throw when triage config is absent (optional)", () => {
+      const config = defaultProjectConfig();
+      delete config.triage;
+      expect(() => validateConfig(config)).not.toThrow();
+    });
+
+    it("does not throw for valid triage config with claude provider", () => {
+      const config = defaultProjectConfig();
+      config.triage = { provider: "claude", model: "claude-sonnet-4-6" };
+      expect(() => validateConfig(config)).not.toThrow();
+    });
+
+    it("does not throw for valid triage config with ollama provider (when ollama section present)", () => {
+      const config = defaultProjectConfig();
+      config.triage = { provider: "ollama", model: "kimi-k2.5" };
+      config.ollama = { baseUrl: "http://localhost:11434", fallback: true };
+      expect(() => validateConfig(config)).not.toThrow();
+    });
+
+    it("throws for triage with unknown provider", () => {
+      const config = defaultProjectConfig();
+      config.triage = { provider: "badprovider", model: "some-model" };
+
+      expect(() => validateConfig(config)).toThrow(
+        /Unknown provider 'badprovider'/,
+      );
+    });
+
+    it("throws for triage with ollama provider but no ollama section", () => {
+      const config = defaultProjectConfig();
+      config.triage = { provider: "ollama", model: "kimi" };
+      delete config.ollama;
+
+      expect(() => validateConfig(config)).toThrow(
+        /triage.*ollama.*no 'ollama' config section/i,
+      );
+    });
+
+    it("does not affect validation of regular agent roles", () => {
+      const config = defaultProjectConfig();
+      config.triage = { provider: "claude", model: "claude-sonnet-4-6" };
+      config.agents.architect.provider = "badprovider";
+
+      expect(() => validateConfig(config)).toThrow(
+        /Unknown provider 'badprovider'/,
+      );
+    });
+  });
+
   describe("missing required subagents", () => {
     it("throws when architect is missing 'explore' subagent", () => {
       const config = defaultProjectConfig();
@@ -427,6 +549,28 @@ describe("applyOllamaFallback", () => {
     expect(config.agents).toEqual(defaultModelConfig());
   });
 
+  it("falls back triage to claude defaults when triage uses ollama", () => {
+    const config = defaultProjectConfig();
+    config.triage = { provider: "ollama", model: "kimi" };
+    config.ollama = { baseUrl: "http://localhost:11434", fallback: true };
+
+    applyOllamaFallback(config);
+
+    expect(config.triage).toEqual({ provider: "claude", model: "claude-sonnet-4-6" });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("Falling back to Claude for triage"),
+    );
+  });
+
+  it("does not modify triage when it already uses claude", () => {
+    const config = defaultProjectConfig();
+    config.triage = { provider: "claude", model: "claude-opus-4-6" };
+
+    applyOllamaFallback(config);
+
+    expect(config.triage).toEqual({ provider: "claude", model: "claude-opus-4-6" });
+  });
+
   it("rewrites subagent models to defaults for ollama agents", () => {
     const config = defaultProjectConfig();
     config.ollama = { baseUrl: "http://localhost:11434", fallback: true };
@@ -462,5 +606,17 @@ describe("hasOllamaProvider", () => {
     config.agents.implementation.provider = "ollama";
     config.agents.qa.provider = "ollama";
     expect(hasOllamaProvider(config)).toBe(true);
+  });
+
+  it("returns true when only triage uses ollama (agents are all claude)", () => {
+    const config = defaultProjectConfig();
+    config.triage = { provider: "ollama", model: "kimi" };
+    expect(hasOllamaProvider(config)).toBe(true);
+  });
+
+  it("returns false when all agents and triage use claude", () => {
+    const config = defaultProjectConfig();
+    config.triage = { provider: "claude", model: "claude-sonnet-4-6" };
+    expect(hasOllamaProvider(config)).toBe(false);
   });
 });

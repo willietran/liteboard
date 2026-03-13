@@ -18,7 +18,7 @@ export function writeProgress(tasks: Task[], projectDir: string): void {
   // Rows
   for (const t of tasks) {
     const completedAt = t.completedAt ?? "";
-    const failureSummary = t.status === "failed" ? t.lastLine : "";
+    const failureSummary = t.status === "failed" || t.status === "needs_human" ? t.lastLine : "";
     lines.push(
       `| ${t.id} | ${escPipe(t.title)} | ${t.status} | ${completedAt} | ${escPipe(failureSummary)} |`,
     );
@@ -61,6 +61,9 @@ export function readProgress(projectDir: string): Map<number, string> {
 
     if (status === "done" && completedAt) {
       result.set(taskId, completedAt);
+    } else if (status === "needs_human") {
+      // Sentinel value — T8 checks for "needs_human" to restore status correctly
+      result.set(taskId, "needs_human");
     }
   }
 
