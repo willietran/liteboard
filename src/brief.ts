@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Task, ModelConfig, Provider } from "./types.js";
+import type { Task, Session, ModelConfig, Provider } from "./types.js";
 import { LOW_COMPLEXITY_THRESHOLD } from "./types.js";
 import { readMemorySnapshot } from "./memory.js";
 import { artifactsDir } from "./paths.js";
@@ -73,7 +73,7 @@ function appendSubagentModelsSection(
 
 function appendMemorySnapshot(parts: string[], projectDir: string): void {
   const memory = readMemorySnapshot(projectDir);
-  if (memory && /^## T\d+/m.test(memory)) {
+  if (memory && /^## [TS]\w+/m.test(memory)) {
     parts.push("**Build Memory** (context from completed tasks):");
     parts.push("```");
     parts.push(memory.trim());
@@ -497,4 +497,253 @@ function buildQABrief(
   parts.push("");
 
   return parts.join("\n");
+}
+
+// ─── Session Briefs ───────────────────────────────────────────────────────────
+
+export function buildSessionArchitectBrief(
+  session: Session,
+  allTasks: Task[],
+  projectDir: string,
+  designDoc: string,
+  manifest: string,
+  featureBranch: string,
+  models?: ModelConfig,
+  provider?: Provider,
+): string {
+  const slug = path.basename(projectDir);
+  const artDir = artifactsDir(projectDir);
+  const parts: string[] = [];
+
+  // 1. Architect orientation
+  parts.push(readCommand("architect-orientation.md"));
+  parts.push("");
+
+  // 2. Sub-agent model hints (explore + planReview)
+  appendSubagentModelsSection(parts, [
+    { name: "Explore", model: models?.architect.subagents.explore?.model ?? "" },
+    { name: "Plan Review", model: models?.architect.subagents.planReview?.model ?? "" },
+  ], models?.architect.provider ?? "claude", models, provider);
+
+  // 3. Quality standards
+  parts.push(readCommand("quality-standards.md"));
+  parts.push("");
+
+  // 4. Workflow: plan review
+  parts.push("---");
+  parts.push("## Workflow");
+  parts.push("");
+  parts.push("### Plan Review");
+  parts.push(readCommand("plan-review.md"));
+  parts.push("");
+  parts.push("### How to process review feedback:");
+  parts.push(readCommand("receiving-code-review.md"));
+  parts.push("");
+
+  // 5. Design doc (full, not scoped)
+  // 6. Manifest excerpt for each task in session (concatenated)
+  const architectManifestExcerpts = session.tasks.map((t) => buildManifestExcerpt(t, manifest)).filter(Boolean).join("\n");
+  appendInlineDocs(parts, designDoc, architectManifestExcerpts);
+
+  // --- cache boundary ---
+  // 7. Session context
+  parts.push("---");
+  parts.push(`I'm planning **Session ${session.id}: ${session.focus}** for the **${slug}** project.`);
+  parts.push("");
+
+  // 8. Memory snapshot
+  appendMemorySnapshot(parts, projectDir);
+
+  // 9. Explore targets + tool constraints
+  const allExploreTargets: string[] = [];
+  for (const task of session.tasks) {
+    const targets = task.explore.length > 0 ? task.explore : inferExploreHints(task, allTasks);
+    allExploreTargets.push(...targets);
+  }
+  const uniqueTargets = [...new Set(allExploreTargets)];
+  if (uniqueTargets.length > 0) {
+    parts.push("**Explore targets:**");
+    for (const t of uniqueTargets) parts.push(`- ${t}`);
+    parts.push("");
+  }
+
+  parts.push("**Tool Usage Constraints:**");
+  parts.push("You may use Bash for: git log, git diff, git status, ls, file inspection. Do NOT use Bash to execute project code (node, npm, npx, python, tsc, etc.). node_modules is never installed in worktrees at planning time. Use documentation tools (context7, WebFetch, WebSearch) to verify library APIs.");
+  parts.push("");
+
+  // 10. Task details for each task in session
+  parts.push("**Session tasks:**");
+  parts.push("");
+  for (const task of session.tasks) {
+    parts.push(`### Task ${task.id}: ${task.title}`);
+    if (task.creates.length > 0)
+      parts.push(`- Creates: ${task.creates.map((f) => `\`${f}\``).join(", ")}`);
+    if (task.modifies.length > 0)
+      parts.push(`- Modifies: ${task.modifies.map((f) => `\`${f}\``).join(", ")}`);
+    if (task.requirements.length > 0) {
+      parts.push("- Requirements:");
+      for (const r of task.requirements) parts.push(`  - ${r}`);
+    }
+    if (task.explore.length > 0) {
+      parts.push("- Explore:");
+      for (const e of task.explore) parts.push(`  - ${e}`);
+    }
+    parts.push("");
+  }
+
+  // 11. Plan output instruction
+  parts.push("### Plan Output");
+  parts.push(`Write your approved plan to \`${artDir}/s${session.id}-session-plan.md\`.`);
+  parts.push("");
+
+  // 12. Rules
+  parts.push("---");
+  parts.push("## Rules");
+  parts.push(`- **Feature branch**: \`${featureBranch}\``);
+  parts.push("- Do NOT touch files unrelated to this session");
+  parts.push("- Do NOT push to remote");
+  parts.push("- Do NOT write implementation code — your output is a plan, not a diff");
+  parts.push("- Do NOT commit — your output is a plan file only");
+  parts.push(`- Write your memory entry to \`${artDir}/s${session.id}-memory-entry.md\` as your final step`);
+  parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
+  parts.push("");
+
+  return parts.join("\n");
+}
+
+export function buildSessionImplementationBrief(
+  session: Session,
+  allTasks: Task[],
+  projectDir: string,
+  designDoc: string,
+  manifest: string,
+  featureBranch: string,
+  models?: ModelConfig,
+  provider?: Provider,
+): string {
+  const slug = path.basename(projectDir);
+  const artDir = artifactsDir(projectDir);
+  const parts: string[] = [];
+
+  // 1. Agent orientation
+  parts.push(readCommand("agent-orientation.md"));
+  parts.push("");
+
+  // 2. Sub-agent model hints (codeReview only)
+  appendSubagentModelsSection(parts, [
+    { name: "Code Review", model: models?.implementation.subagents.codeReview?.model ?? "" },
+  ], models?.implementation.provider ?? "claude", models, provider);
+
+  // 3. Quality standards
+  parts.push(readCommand("quality-standards.md"));
+  parts.push("");
+
+  // 4. Shell anti-patterns
+  parts.push(readCommand("shell-anti-patterns.md"));
+  parts.push("");
+
+  // 5. Workflow
+  parts.push("---");
+  parts.push("## Workflow");
+  parts.push("");
+  parts.push("### Phase 1: Implement");
+  const tddTasks = session.tasks.filter((t) => t.tddPhase && t.tddPhase !== "Exempt");
+  if (tddTasks.length > 0) {
+    parts.push("This session contains TDD tasks. For each task that specifies a TDD phase, write failing tests first (RED), verify failure, then implement (GREEN), then refactor. Non-TDD tasks: tests encouraged but not required first.");
+  } else {
+    parts.push("This session is **TDD-Exempt**. Tests are encouraged but not required first.");
+  }
+  parts.push("");
+  parts.push("### Phase 2: Verify");
+  parts.push(readCommand("verification.md"));
+  parts.push("");
+  parts.push("### Phase 3: Code Review");
+  parts.push(readCommand("session-review.md"));
+  parts.push("");
+  parts.push("### How to process review feedback:");
+  parts.push(readCommand("receiving-code-review.md"));
+  parts.push("");
+  parts.push("### Review criteria:");
+  parts.push(readCommand("code-reviewer.md"));
+  parts.push("");
+
+  // 6. Design doc (full)
+  // 7. Manifest excerpt for each task in session (concatenated)
+  const implManifestExcerpts = session.tasks.map((t) => buildManifestExcerpt(t, manifest)).filter(Boolean).join("\n");
+  appendInlineDocs(parts, designDoc, implManifestExcerpts);
+
+  // --- cache boundary ---
+  // 8. Session context
+  parts.push("---");
+  parts.push(`I'm implementing **Session ${session.id}: ${session.focus}** for the **${slug}** project.`);
+  parts.push("");
+
+  // 9. Plan read instruction (if any task has complexity > LOW_COMPLEXITY_THRESHOLD)
+  const needsPlan = session.tasks.some((t) => t.complexity > LOW_COMPLEXITY_THRESHOLD);
+  if (needsPlan) {
+    parts.push(`**Session plan** (read before implementing):`);
+    parts.push(`- Read the approved plan from \`${artDir}/s${session.id}-session-plan.md\` before implementing.`);
+    parts.push("");
+  }
+
+  // 10. Memory snapshot
+  appendMemorySnapshot(parts, projectDir);
+
+  // 11. All tasks in order with their details and commit messages
+  for (const task of session.tasks) {
+    parts.push(`### Task ${task.id}: ${task.title}`);
+    if (task.creates.length > 0)
+      parts.push(`- Creates: ${task.creates.map((f) => `\`${f}\``).join(", ")}`);
+    if (task.modifies.length > 0)
+      parts.push(`- Modifies: ${task.modifies.map((f) => `\`${f}\``).join(", ")}`);
+    if (task.requirements.length > 0) {
+      parts.push("- Requirements:");
+      for (const r of task.requirements) parts.push(`  - ${r}`);
+    }
+    parts.push(`- **Commit message** (use exactly): \`${task.commitMessage}\``);
+    parts.push("");
+  }
+
+  // 12. Rules
+  parts.push("---");
+  parts.push("## Rules");
+  parts.push(`- **Feature branch**: \`${featureBranch}\``);
+  parts.push("- Do NOT touch files unrelated to this session");
+  parts.push("- Do NOT push to remote");
+  parts.push("- Commit after each task using the specified commit message");
+  parts.push(`- Write your memory entry to \`${artDir}/s${session.id}-memory-entry.md\` as your final step before committing`);
+  parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
+  parts.push("");
+
+  return parts.join("\n");
+}
+
+function buildSessionQABrief(
+  session: Session,
+  allTasks: Task[],
+  projectDir: string,
+  designDoc: string,
+  manifest: string,
+  featureBranch: string,
+  models?: ModelConfig,
+  provider?: Provider,
+): string {
+  // QA sessions always have exactly 1 task by design — delegate to existing logic
+  return buildQABrief(session.tasks[0], allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
+}
+
+export function buildSessionBrief(
+  session: Session,
+  allTasks: Task[],
+  projectDir: string,
+  designDoc: string,
+  manifest: string,
+  featureBranch: string,
+  models?: ModelConfig,
+  provider?: Provider,
+): string {
+  if (session.tasks.every((t) => t.type === "qa")) {
+    return buildSessionQABrief(session, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
+  }
+  return buildSessionImplementationBrief(session, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
 }

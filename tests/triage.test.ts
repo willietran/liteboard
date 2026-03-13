@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Task, DecisionContext, DecisionRecord, FailureStage, ActionDescription } from "../src/types.js";
+import type { Task, Session, DecisionContext, DecisionRecord, FailureStage, ActionDescription } from "../src/types.js";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ vi.mock("../src/spawner.js", () => ({
 }));
 
 vi.mock("../src/worktree.js", () => ({
-  getWorktreePath: (slug: string, taskId: number) => `/tmp/liteboard-${slug}-t${taskId}`,
+  getWorktreePath: (slug: string, sessionId: string) => `/tmp/liteboard-${slug}-s${sessionId}`,
   cleanupWorktree: vi.fn(),
   recreateWorktreeFromBranch: vi.fn(() => "/tmp/worktree-path"),
 }));
@@ -102,6 +102,21 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
   };
 }
 
+function makeSession(partial: Partial<Session> & { id: string }): Session {
+  return {
+    tasks: [],
+    complexity: 3,
+    focus: `Session ${partial.id}`,
+    status: "failed",
+    bytesReceived: 0,
+    turnCount: 0,
+    lastLine: "",
+    stage: "",
+    attemptCount: 0,
+    ...partial,
+  };
+}
+
 function makeContext(partial?: Partial<DecisionContext>): DecisionContext {
   return {
     trigger: {
@@ -120,6 +135,14 @@ function makeContext(partial?: Partial<DecisionContext>): DecisionContext {
       files: ["src/foo.ts"],
       blockedDownstream: 2,
       ...partial?.task,
+    },
+    session: {
+      id: "abc",
+      totalTasks: 2,
+      completedTasks: 0,
+      remainingTasks: ["Task 1", "Task 2"],
+      complexity: 3,
+      ...partial?.session,
     },
     state: {
       branchExists: true,
@@ -273,10 +296,10 @@ describe("writeDecisionRecord", () => {
     decision: { action: "retry_from_scratch", reasoning: "Fresh start" },
   };
 
-  it("appends JSONL to decisions file", () => {
-    writeDecisionRecord(5, record, "/proj");
+  it("appends JSONL to decisions file using session ID", () => {
+    writeDecisionRecord("abc", record, "/proj");
     expect(mockAppendFileSync).toHaveBeenCalledWith(
-      "/proj/artifacts/t5-decisions.jsonl",
+      "/proj/artifacts/sabc-decisions.jsonl",
       expect.stringMatching(/^\{.*\}\n$/),
       "utf-8",
     );
@@ -290,20 +313,20 @@ describe("writeDecisionRecord", () => {
       .mockImplementationOnce(() => { throw enoentErr; })
       .mockImplementationOnce(() => undefined);
 
-    writeDecisionRecord(5, record, "/proj");
+    writeDecisionRecord("abc", record, "/proj");
 
     expect(mockMkdirSync).toHaveBeenCalledWith("/proj/artifacts", { recursive: true });
     expect(mockAppendFileSync).toHaveBeenCalledTimes(2);
     // Both calls should use the same path and content
-    expect(mockAppendFileSync.mock.calls[0][0]).toBe("/proj/artifacts/t5-decisions.jsonl");
-    expect(mockAppendFileSync.mock.calls[1][0]).toBe("/proj/artifacts/t5-decisions.jsonl");
+    expect(mockAppendFileSync.mock.calls[0][0]).toBe("/proj/artifacts/sabc-decisions.jsonl");
+    expect(mockAppendFileSync.mock.calls[1][0]).toBe("/proj/artifacts/sabc-decisions.jsonl");
     expect(mockAppendFileSync.mock.calls[0][1]).toBe(mockAppendFileSync.mock.calls[1][1]);
   });
 
   it("writes valid JSONL format for multiple records", () => {
     const record2: DecisionRecord = { ...record, attemptNumber: 2 };
-    writeDecisionRecord(5, record, "/proj");
-    writeDecisionRecord(5, record2, "/proj");
+    writeDecisionRecord("abc", record, "/proj");
+    writeDecisionRecord("abc", record2, "/proj");
 
     const line1 = mockAppendFileSync.mock.calls[0][1] as string;
     const line2 = mockAppendFileSync.mock.calls[1][1] as string;
@@ -326,12 +349,18 @@ describe("readDecisionHistory", () => {
 
   it("returns empty array when file does not exist", () => {
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
-    expect(readDecisionHistory(5, "/proj")).toEqual([]);
+    expect(readDecisionHistory("abc", "/proj")).toEqual([]);
+  });
+
+  it("reads from session-scoped file path", () => {
+    mockReadFileSync.mockReturnValueOnce(JSON.stringify(record) as unknown as Buffer);
+    readDecisionHistory("abc", "/proj");
+    expect(mockReadFileSync).toHaveBeenCalledWith("/proj/artifacts/sabc-decisions.jsonl", "utf-8");
   });
 
   it("parses single record", () => {
     mockReadFileSync.mockReturnValueOnce(JSON.stringify(record) as unknown as Buffer);
-    const result = readDecisionHistory(5, "/proj");
+    const result = readDecisionHistory("abc", "/proj");
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual(record);
   });
@@ -342,7 +371,7 @@ describe("readDecisionHistory", () => {
     mockReadFileSync.mockReturnValueOnce(
       `${JSON.stringify(record)}\n${JSON.stringify(record2)}\n${JSON.stringify(record3)}` as unknown as Buffer,
     );
-    const result = readDecisionHistory(5, "/proj");
+    const result = readDecisionHistory("abc", "/proj");
     expect(result).toHaveLength(3);
   });
 
@@ -350,28 +379,28 @@ describe("readDecisionHistory", () => {
     mockReadFileSync.mockReturnValueOnce(
       `${JSON.stringify(record)}\nnot_json\n${JSON.stringify({ ...record, attemptNumber: 2 })}` as unknown as Buffer,
     );
-    const result = readDecisionHistory(5, "/proj");
+    const result = readDecisionHistory("abc", "/proj");
     expect(result).toHaveLength(2);
   });
 
   it("handles empty file", () => {
     mockReadFileSync.mockReturnValueOnce("" as unknown as Buffer);
-    expect(readDecisionHistory(5, "/proj")).toEqual([]);
+    expect(readDecisionHistory("abc", "/proj")).toEqual([]);
   });
 
   it("handles trailing newline", () => {
     mockReadFileSync.mockReturnValueOnce(`${JSON.stringify(record)}\n` as unknown as Buffer);
-    expect(readDecisionHistory(5, "/proj")).toHaveLength(1);
+    expect(readDecisionHistory("abc", "/proj")).toHaveLength(1);
   });
 });
 
 // ─── logTriageResponse ────────────────────────────────────────────────────────
 
 describe("logTriageResponse", () => {
-  it("appends response to log file with timestamp header", () => {
-    logTriageResponse(3, "some response", "/proj");
+  it("appends response to log file with session-scoped path and timestamp header", () => {
+    logTriageResponse("abc", "some response", "/proj");
     expect(mockAppendFileSync).toHaveBeenCalledWith(
-      "/proj/artifacts/t3-triage-response.log",
+      "/proj/artifacts/sabc-triage-response.log",
       expect.stringContaining("some response"),
       "utf-8",
     );
@@ -386,7 +415,7 @@ describe("logTriageResponse", () => {
       .mockImplementationOnce(() => { throw enoentErr; })
       .mockImplementationOnce(() => undefined);
 
-    logTriageResponse(3, "response", "/proj");
+    logTriageResponse("abc", "response", "/proj");
 
     expect(mockMkdirSync).toHaveBeenCalledWith("/proj/artifacts", { recursive: true });
     expect(mockAppendFileSync).toHaveBeenCalledTimes(2);
@@ -396,7 +425,7 @@ describe("logTriageResponse", () => {
 // ─── writeEscalation ──────────────────────────────────────────────────────────
 
 describe("writeEscalation", () => {
-  const task = makeTask({ id: 5, title: "My Task" });
+  const session = makeSession({ id: "abc", focus: "My Session" });
   const decision = { action: "escalate" as const, reasoning: "Cannot auto-recover from this state" };
   const history: DecisionRecord[] = [
     {
@@ -408,27 +437,35 @@ describe("writeEscalation", () => {
     },
   ];
 
-  it("writes markdown escalation file with context and history", () => {
+  it("writes markdown escalation file with session context and history", () => {
     const context = makeContext({ history });
-    writeEscalation(task, decision, context, "/proj");
+    writeEscalation(session, decision, context, "/proj");
 
     expect(mockWriteFileSync).toHaveBeenCalledWith(
-      "/proj/artifacts/t5-escalation.md",
+      "/proj/artifacts/sabc-escalation.md",
       expect.any(String),
       "utf-8",
     );
 
     const content = mockWriteFileSync.mock.calls[0][1] as string;
-    expect(content).toContain("My Task");
+    expect(content).toContain("My Session");
     expect(content).toContain("implementation"); // trigger stage
     expect(content).toContain("Cannot auto-recover from this state"); // reasoning
     expect(content).toContain("retry_from_scratch"); // history entry
     expect(content).toContain("Suggested Human Actions");
   });
 
+  it("uses session ID in file name and title", () => {
+    const context = makeContext();
+    writeEscalation(session, decision, context, "/proj");
+
+    const content = mockWriteFileSync.mock.calls[0][1] as string;
+    expect(content).toContain("Session abc");
+  });
+
   it("handles empty decision history", () => {
     const context = makeContext({ history: [] });
-    writeEscalation(task, decision, context, "/proj");
+    writeEscalation(session, decision, context, "/proj");
 
     const content = mockWriteFileSync.mock.calls[0][1] as string;
     expect(content).toContain("No previous attempts");
@@ -441,7 +478,7 @@ describe("writeEscalation", () => {
       .mockImplementationOnce(() => undefined);
 
     const context = makeContext();
-    writeEscalation(task, decision, context, "/proj");
+    writeEscalation(session, decision, context, "/proj");
 
     expect(mockMkdirSync).toHaveBeenCalledWith("/proj/artifacts", { recursive: true });
     expect(mockWriteFileSync).toHaveBeenCalledTimes(2);
@@ -463,6 +500,28 @@ describe("buildTriagePrompt", () => {
     const parsed = JSON.parse(jsonMatch![1]);
     expect(parsed.trigger.stage).toBe("implementation");
     expect(parsed.task.id).toBe(5);
+  });
+
+  it("includes session field in context JSON", () => {
+    const context = makeContext({
+      session: {
+        id: "xyz",
+        totalTasks: 3,
+        completedTasks: 1,
+        remainingTasks: ["Task A", "Task B"],
+        complexity: 5,
+      },
+    });
+    const prompt = buildTriagePrompt(context);
+
+    const jsonMatch = prompt.match(/<decision_context>\n([\s\S]*?)\n<\/decision_context>/);
+    expect(jsonMatch).not.toBeNull();
+    const parsed = JSON.parse(jsonMatch![1]);
+    expect(parsed.session.id).toBe("xyz");
+    expect(parsed.session.totalTasks).toBe(3);
+    expect(parsed.session.completedTasks).toBe(1);
+    expect(parsed.session.remainingTasks).toEqual(["Task A", "Task B"]);
+    expect(parsed.session.complexity).toBe(5);
   });
 
   it("includes decision history when present", () => {
@@ -566,21 +625,28 @@ describe("gatherDecisionContext", () => {
   const trigger = { stage: "implementation" as const, exitCode: 1 };
 
   it("gathers complete context when branch exists", async () => {
-    const taskBranch = "feature/main-t5";
+    const sessionBranch = "feature/main-sabc";
     const featureBranch = "feature/main";
-    const task = makeTask({ id: 5, title: "My Task", creates: ["src/foo.ts"], modifies: [] });
-    const downstream = makeTask({ id: 6, dependsOn: [5] });
-    const unrelated = makeTask({ id: 7, dependsOn: [3] });
+    const task1 = makeTask({ id: 5, title: "My Task", creates: ["src/foo.ts"], modifies: [] });
+    const session = makeSession({
+      id: "abc",
+      tasks: [task1],
+      complexity: 3,
+      focus: "My Session",
+    });
+    const downstreamTask = makeTask({ id: 6, dependsOn: [5] });
+    const downstreamSession = makeSession({ id: "def", tasks: [downstreamTask] });
+    const unrelated = makeSession({ id: "ghi", tasks: [makeTask({ id: 7, dependsOn: [3] })] });
 
     mockExec
-      .mockReturnValueOnce(Buffer.from(taskBranch))    // git branch --list
-      .mockReturnValueOnce(Buffer.from("3"))            // git rev-list --count
+      .mockReturnValueOnce(Buffer.from(sessionBranch))    // git branch --list
+      .mockReturnValueOnce(Buffer.from("3"))               // git rev-list --count
       .mockReturnValueOnce(Buffer.from(" src/foo.ts | 10 +++---")) // git diff --stat
-      .mockReturnValueOnce(Buffer.from(""));            // git status --porcelain (clean)
+      .mockReturnValueOnce(Buffer.from(""));               // git status --porcelain (clean)
 
     mockExistsSync.mockImplementation((p) => {
       const s = String(p);
-      return s.includes("liteboard") || s.includes("task-plan"); // worktree + plan exist
+      return s.includes("liteboard") || s.includes("session-plan"); // worktree + plan exist
     });
 
     mockGetRecentOutput.mockReturnValueOnce(["line1", "line2"]);
@@ -588,7 +654,7 @@ describe("gatherDecisionContext", () => {
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
     const ctx = await gatherDecisionContext(
-      task, [task, downstream, unrelated], featureBranch, "/proj", 4, trigger,
+      session, [session, downstreamSession, unrelated], featureBranch, "/proj", 4, trigger,
     );
 
     expect(ctx.trigger.stage).toBe("implementation");
@@ -600,23 +666,29 @@ describe("gatherDecisionContext", () => {
     expect(ctx.task.files).toContain("src/foo.ts");
     expect(ctx.task.blockedDownstream).toBe(1);
 
+    expect(ctx.session.id).toBe("abc");
+    expect(ctx.session.totalTasks).toBe(1);
+    expect(ctx.session.completedTasks).toBe(0);
+    expect(ctx.session.remainingTasks).toEqual(["My Task"]);
+    expect(ctx.session.complexity).toBe(3);
+
     expect(ctx.state.branchExists).toBe(true);
     expect(ctx.state.commitsAhead).toBe(3);
     expect(ctx.state.worktreeExists).toBe(true);
     expect(ctx.state.worktreeClean).toBe(true);
     expect(ctx.state.planExists).toBe(true);
-    expect(ctx.state.freeSlots).toBe(4); // concurrency 4, 0 running (task is failed)
+    expect(ctx.state.freeSlots).toBe(4); // concurrency 4, 0 running (session is failed)
 
     expect(ctx.actions).toHaveLength(8);
   });
 
   it("handles missing branch — skips rev-list and diff", async () => {
-    const task = makeTask({ id: 5 });
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
     mockExec.mockReturnValueOnce(Buffer.from(""));  // git branch --list → empty
     mockExistsSync.mockReturnValue(false);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
 
     expect(ctx.state.branchExists).toBe(false);
     expect(ctx.state.commitsAhead).toBe(0);
@@ -630,34 +702,34 @@ describe("gatherDecisionContext", () => {
   });
 
   it("handles dirty worktree", async () => {
-    const task = makeTask({ id: 5 });
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
     mockExec
-      .mockReturnValueOnce(Buffer.from("feature/main-t5"))   // branch --list
-      .mockReturnValueOnce(Buffer.from("1"))                  // rev-list
-      .mockReturnValueOnce(Buffer.from(""))                   // diff --stat
-      .mockReturnValueOnce(Buffer.from(" M src/foo.ts"));     // status --porcelain → dirty
+      .mockReturnValueOnce(Buffer.from("feature/main-sabc"))  // branch --list
+      .mockReturnValueOnce(Buffer.from("1"))                   // rev-list
+      .mockReturnValueOnce(Buffer.from(""))                    // diff --stat
+      .mockReturnValueOnce(Buffer.from(" M src/foo.ts"));      // status --porcelain → dirty
 
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
     expect(ctx.state.worktreeClean).toBe(false);
   });
 
   it("handles missing worktree — skips status check", async () => {
-    const task = makeTask({ id: 5 });
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
     mockExec
-      .mockReturnValueOnce(Buffer.from("feature/main-t5"))  // branch --list
-      .mockReturnValueOnce(Buffer.from("2"))                 // rev-list
-      .mockReturnValueOnce(Buffer.from(""));                 // diff --stat
+      .mockReturnValueOnce(Buffer.from("feature/main-sabc"))  // branch --list
+      .mockReturnValueOnce(Buffer.from("2"))                   // rev-list
+      .mockReturnValueOnce(Buffer.from(""));                   // diff --stat
 
     mockExistsSync.mockImplementation((p) => {
       // Plan exists but worktree doesn't
-      return String(p).includes("task-plan");
+      return String(p).includes("session-plan");
     });
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
 
     expect(ctx.state.worktreeExists).toBe(false);
     expect(ctx.state.worktreeClean).toBe(false);
@@ -668,9 +740,9 @@ describe("gatherDecisionContext", () => {
   });
 
   it("handles missing plan", async () => {
-    const task = makeTask({ id: 5 });
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
     mockExec
-      .mockReturnValueOnce(Buffer.from("feature/main-t5"))
+      .mockReturnValueOnce(Buffer.from("feature/main-sabc"))
       .mockReturnValueOnce(Buffer.from("1"))
       .mockReturnValueOnce(Buffer.from(""))
       .mockReturnValueOnce(Buffer.from(""));
@@ -681,35 +753,35 @@ describe("gatherDecisionContext", () => {
     });
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
     expect(ctx.state.planExists).toBe(false);
   });
 
   it("reads error tail from ring buffer", async () => {
-    const task = makeTask({ id: 5 });
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
     mockExec.mockReturnValueOnce(Buffer.from(""));
     mockExistsSync.mockReturnValue(false);
     mockGetRecentOutput.mockReturnValueOnce(["line1", "line2", "line3"]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
     expect(ctx.trigger.errorTail).toBe("line1\nline2\nline3");
   });
 
   it("falls back to log file when ring buffer is empty", async () => {
-    const task = makeTask({ id: 5, logPath: "/logs/t5.log" });
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })], logPath: "/logs/sabc.log" });
     const logLines = Array.from({ length: 40 }, (_, i) => `log line ${i + 1}`).join("\n");
 
     mockExec.mockReturnValueOnce(Buffer.from(""));
     mockGetRecentOutput.mockReturnValueOnce([]);
     // existsSync: false for worktree + plan, true for log file
-    mockExistsSync.mockImplementation((p) => String(p) === "/logs/t5.log");
+    mockExistsSync.mockImplementation((p) => String(p) === "/logs/sabc.log");
     // readDecisionHistory is called first (throws ENOENT), then log file is read
     mockReadFileSync
       .mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }) // decisions JSONL
       .mockReturnValueOnce(logLines as unknown as Buffer); // log file
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
     const errorLines = ctx.trigger.errorTail.split("\n");
     expect(errorLines).toHaveLength(30);
     expect(errorLines[0]).toBe("log line 11"); // last 30 of 40 lines
@@ -717,38 +789,48 @@ describe("gatherDecisionContext", () => {
   });
 
   it("returns empty errorTail when no output available", async () => {
-    const task = makeTask({ id: 5 }); // no logPath
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] }); // no logPath
     mockExec.mockReturnValueOnce(Buffer.from(""));
     mockExistsSync.mockReturnValue(false);
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
     expect(ctx.trigger.errorTail).toBe("");
   });
 
-  it("populates attemptCount from decision history", async () => {
-    const task = makeTask({ id: 5 });
+  it("uses session.attemptCount directly (not history.length)", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })], attemptCount: 3 });
     const record1 = { timestamp: "", attemptNumber: 1, trigger: { stage: "implementation" as const, errorSummary: "" }, decision: { action: "retry_from_scratch" as const, reasoning: "r" } };
     const record2 = { ...record1, attemptNumber: 2 };
     mockExec.mockReturnValueOnce(Buffer.from(""));
     mockExistsSync.mockReturnValue(false);
     mockGetRecentOutput.mockReturnValueOnce([]);
+    // History has 2 records, but session.attemptCount = 3 — should use the session value
     mockReadFileSync.mockReturnValueOnce(
       `${JSON.stringify(record1)}\n${JSON.stringify(record2)}` as unknown as Buffer,
     );
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
-    expect(ctx.state.attemptCount).toBe(2);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    expect(ctx.state.attemptCount).toBe(3);
   });
 
-  it("computes blockedDownstream correctly", async () => {
-    const task = makeTask({ id: 5 });
-    const dep1 = makeTask({ id: 10, dependsOn: [5] });
-    const dep2 = makeTask({ id: 11, dependsOn: [5] });
-    const dep3 = makeTask({ id: 12, dependsOn: [5] });
-    const other = makeTask({ id: 13, dependsOn: [3] });
-    const other2 = makeTask({ id: 14, dependsOn: [1, 2] });
+  it("computes blockedDownstream from sessions whose tasks depend on this session's tasks", async () => {
+    const task5 = makeTask({ id: 5 });
+    const task6 = makeTask({ id: 6 });
+    const session = makeSession({ id: "abc", tasks: [task5, task6] });
+
+    // Session def has a task that depends on task 5 → blocked
+    const dep1Task = makeTask({ id: 10, dependsOn: [5] });
+    const depSession1 = makeSession({ id: "def", tasks: [dep1Task] });
+
+    // Session ghi has a task that depends on task 6 → blocked
+    const dep2Task = makeTask({ id: 11, dependsOn: [6] });
+    const depSession2 = makeSession({ id: "ghi", tasks: [dep2Task] });
+
+    // Session jkl has tasks that don't depend on tasks 5 or 6 → not blocked
+    const otherTask = makeTask({ id: 12, dependsOn: [3] });
+    const otherSession = makeSession({ id: "jkl", tasks: [otherTask] });
 
     mockExec.mockReturnValueOnce(Buffer.from(""));
     mockExistsSync.mockReturnValue(false);
@@ -756,16 +838,16 @@ describe("gatherDecisionContext", () => {
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
     const ctx = await gatherDecisionContext(
-      task, [task, dep1, dep2, dep3, other, other2], "feature/main", "/proj", 4, trigger,
+      session, [session, depSession1, depSession2, otherSession], "feature/main", "/proj", 4, trigger,
     );
-    expect(ctx.task.blockedDownstream).toBe(3);
+    expect(ctx.task.blockedDownstream).toBe(2);
   });
 
-  it("computes runningTasks and freeSlots", async () => {
-    const task = makeTask({ id: 5 });
-    const running1 = makeTask({ id: 1, status: "running" });
-    const running2 = makeTask({ id: 2, status: "running" });
-    const done = makeTask({ id: 3, status: "done" });
+  it("computes runningTasks and freeSlots from sessions", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
+    const running1 = makeSession({ id: "r1", status: "running", tasks: [] });
+    const running2 = makeSession({ id: "r2", status: "running", tasks: [] });
+    const done = makeSession({ id: "d1", status: "done", tasks: [] });
 
     mockExec.mockReturnValueOnce(Buffer.from(""));
     mockExistsSync.mockReturnValue(false);
@@ -773,26 +855,59 @@ describe("gatherDecisionContext", () => {
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
     const ctx = await gatherDecisionContext(
-      task, [task, running1, running2, done], "feature/main", "/proj", 4, trigger,
+      session, [session, running1, running2, done], "feature/main", "/proj", 4, trigger,
     );
     expect(ctx.state.runningTasks).toBe(2);
     expect(ctx.state.freeSlots).toBe(2);
   });
 
   it("handles git rev-list failure gracefully", async () => {
-    const task = makeTask({ id: 5 });
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
     const gitError = new Error("git rev-list failed: fatal error");
 
     mockExec
-      .mockReturnValueOnce(Buffer.from("feature/main-t5"))  // branch --list succeeds
-      .mockImplementationOnce(() => { throw gitError; });    // rev-list throws
+      .mockReturnValueOnce(Buffer.from("feature/main-sabc"))  // branch --list succeeds
+      .mockImplementationOnce(() => { throw gitError; });      // rev-list throws
 
     mockExistsSync.mockReturnValue(false);
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
     expect(ctx.state.commitsAhead).toBe(0); // fallback to 0, no throw
+  });
+
+  it("session field reflects tasks completion status", async () => {
+    const taskDone = makeTask({ id: 1, status: "done", title: "Done Task" });
+    const taskQueued = makeTask({ id: 2, status: "queued", title: "Queued Task" });
+    const taskFailed = makeTask({ id: 3, status: "failed", title: "Failed Task" });
+    const session = makeSession({ id: "abc", tasks: [taskDone, taskQueued, taskFailed], complexity: 7 });
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockReturnValue(false);
+    mockGetRecentOutput.mockReturnValueOnce([]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+
+    expect(ctx.session.totalTasks).toBe(3);
+    expect(ctx.session.completedTasks).toBe(1);
+    expect(ctx.session.remainingTasks).toEqual(["Queued Task", "Failed Task"]);
+    expect(ctx.session.complexity).toBe(7);
+  });
+
+  it("uses session-scoped plan path", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockImplementation((p) => {
+      // Only the session plan exists
+      return String(p) === "/proj/artifacts/sabc-session-plan.md";
+    });
+    mockGetRecentOutput.mockReturnValueOnce([]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    expect(ctx.state.planExists).toBe(true);
   });
 });
 
@@ -884,13 +999,13 @@ describe("askTriage", () => {
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
-  it("calls logTriageResponse with raw stdout", async () => {
-    const ctx = makeContext();
+  it("calls logTriageResponse with session ID from context.session", async () => {
+    const ctx = makeContext({ session: { id: "mysession", totalTasks: 1, completedTasks: 0, remainingTasks: [], complexity: 3 } });
     mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
 
     await askTriage(ctx, "/proj", makeConfig());
     expect(mockAppendFileSync).toHaveBeenCalledWith(
-      expect.stringContaining("triage-response.log"),
+      expect.stringContaining("smysession-triage-response.log"),
       expect.any(String),
       "utf-8",
     );
@@ -929,105 +1044,108 @@ describe("executeTriageAction", () => {
   const projectDir = "/proj";
   const verbose = false;
 
-  it("retry_from_scratch: calls cleanupWorktree and resets task state", async () => {
-    const task = makeTask({ id: 3, status: "failed", stage: "Implementation", turnCount: 5, bytesReceived: 100 });
+  it("retry_from_scratch: calls cleanupWorktree and resets session state", async () => {
+    const session = makeSession({ id: "s3", status: "failed", stage: "Implementation", turnCount: 5, bytesReceived: 100 });
     const decision = { action: "retry_from_scratch" as const, reasoning: "start over" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(mockCleanupWorktree).toHaveBeenCalledWith(slug, task.id, featureBranch, verbose, { preserveBranch: false });
-    expect(task.status).toBe("queued");
-    expect(task.stage).toBe("");
-    expect(task.lastLine).toBe("");
-    expect(task.turnCount).toBe(0);
-    expect(task.bytesReceived).toBe(0);
-    expect(task.attemptCount).toBe(1);
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(slug, session.id, featureBranch, verbose, { preserveBranch: false });
+    expect(session.status).toBe("queued");
+    expect(session.stage).toBe("");
+    expect(session.lastLine).toBe("");
+    expect(session.turnCount).toBe(0);
+    expect(session.bytesReceived).toBe(0);
+    expect(session.attemptCount).toBe(1);
   });
 
   it("retry_from_scratch: increments existing attemptCount", async () => {
-    const task = makeTask({ id: 3, status: "failed", attemptCount: 2 });
+    const session = makeSession({ id: "s3", status: "failed", attemptCount: 2 });
     const decision = { action: "retry_from_scratch" as const, reasoning: "start over" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(task.attemptCount).toBe(3);
+    expect(session.attemptCount).toBe(3);
   });
 
   it("resume_from_branch: recreates worktree when missing, sets skipArchitect", async () => {
-    const task = makeTask({ id: 3, status: "failed" });
+    const session = makeSession({ id: "s3", status: "failed" });
     mockExistsSync.mockReturnValue(false); // worktree doesn't exist
     const decision = { action: "resume_from_branch" as const, reasoning: "branch has work" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(mockRecreateWorktree).toHaveBeenCalledWith(slug, task.id, featureBranch, verbose);
-    expect(task.worktreePath).toBe("/tmp/worktree-path");
-    expect(task.status).toBe("queued");
-    expect(task.skipArchitect).toBe(true);
+    expect(mockRecreateWorktree).toHaveBeenCalledWith(slug, session.id, featureBranch, verbose);
+    expect(session.worktreePath).toBe("/tmp/worktree-path");
+    expect(session.status).toBe("queued");
+    expect(session.skipArchitect).toBe(true);
   });
 
   it("resume_from_branch: skips worktree recreation when worktree exists, normalizes worktreePath", async () => {
     const wtPath = "/tmp/existing-worktree";
-    const task = makeTask({ id: 3, status: "failed", worktreePath: wtPath });
+    const session = makeSession({ id: "s3", status: "failed", worktreePath: wtPath });
     mockExistsSync.mockImplementation((p) => String(p) === wtPath);
     const decision = { action: "resume_from_branch" as const, reasoning: "resume" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
     expect(mockRecreateWorktree).not.toHaveBeenCalled();
-    expect(task.worktreePath).toBe(wtPath);
-    expect(task.status).toBe("queued");
-    expect(task.skipArchitect).toBe(true);
+    expect(session.worktreePath).toBe(wtPath);
+    expect(session.status).toBe("queued");
+    expect(session.skipArchitect).toBe(true);
   });
 
   it("retry_merge_only: sets merging status", async () => {
-    const task = makeTask({ id: 3, status: "failed" });
+    const session = makeSession({ id: "s3", status: "failed" });
     const decision = { action: "retry_merge_only" as const, reasoning: "try merge" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(task.status).toBe("merging");
+    expect(session.status).toBe("merging");
   });
 
   it("skip_and_continue: marks done with skip reason", async () => {
-    const task = makeTask({ id: 3, status: "failed" });
-    const decision = { action: "skip_and_continue" as const, reasoning: "Non-critical task" };
+    const session = makeSession({ id: "s3", status: "failed" });
+    const decision = { action: "skip_and_continue" as const, reasoning: "Non-critical session" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(task.status).toBe("done");
-    expect(task.lastLine).toBe("[SKIPPED] Non-critical task");
+    expect(session.status).toBe("done");
+    expect(session.lastLine).toBe("[SKIPPED] Non-critical session");
   });
 
-  it("skip_and_continue: logs warning when blocked downstream tasks exist", async () => {
-    const task = makeTask({ id: 3, status: "failed" });
-    const dep1 = makeTask({ id: 10, dependsOn: [3] });
-    const dep2 = makeTask({ id: 11, dependsOn: [3] });
+  it("skip_and_continue: logs warning when blocked downstream sessions exist", async () => {
+    const task3 = makeTask({ id: 3 });
+    const session = makeSession({ id: "s3", status: "failed", tasks: [task3] });
+    const depTask1 = makeTask({ id: 10, dependsOn: [3] });
+    const depTask2 = makeTask({ id: 11, dependsOn: [3] });
+    const dep1 = makeSession({ id: "dep1", tasks: [depTask1] });
+    const dep2 = makeSession({ id: "dep2", tasks: [depTask2] });
     const decision = { action: "skip_and_continue" as const, reasoning: "skip" };
     const ctx = makeContext();
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [task, dep1, dep2], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [session, dep1, dep2], verbose);
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("2"));
     warnSpy.mockRestore();
   });
 
   it("escalate: writes escalation file and sets needs_human", async () => {
-    const task = makeTask({ id: 3, status: "failed" });
+    const session = makeSession({ id: "s3", status: "failed" });
     const decision = { action: "escalate" as const, reasoning: "cannot recover" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(task.status).toBe("needs_human");
+    expect(session.status).toBe("needs_human");
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining("escalation.md"),
       expect.any(String),
@@ -1036,57 +1154,57 @@ describe("executeTriageAction", () => {
   });
 
   it("reuse_plan: sets queued with skipArchitect", async () => {
-    const task = makeTask({ id: 3, status: "failed", stage: "architect" });
+    const session = makeSession({ id: "s3", status: "failed", stage: "architect" });
     const decision = { action: "reuse_plan" as const, reasoning: "plan exists" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(task.status).toBe("queued");
-    expect(task.skipArchitect).toBe(true);
-    expect(task.stage).toBe("");
+    expect(session.status).toBe("queued");
+    expect(session.skipArchitect).toBe(true);
+    expect(session.stage).toBe("");
   });
 
   it("extend_timeout: calls extendStallTimeout with parsed duration", async () => {
-    const task = makeTask({ id: 3, status: "running" });
+    const session = makeSession({ id: "s3", status: "running" });
     const decision = { action: "extend_timeout" as const, reasoning: "give more time", details: { timeoutMs: "300000" } };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(mockExtendStallTimeout).toHaveBeenCalledWith(task, 300000);
-    expect(task.status).toBe("running"); // no status mutation
+    expect(mockExtendStallTimeout).toHaveBeenCalledWith(session, 300000);
+    expect(session.status).toBe("running"); // no status mutation
   });
 
   it("extend_timeout: uses default 600000ms when no timeoutMs in details", async () => {
-    const task = makeTask({ id: 3, status: "running" });
+    const session = makeSession({ id: "s3", status: "running" });
     const decision = { action: "extend_timeout" as const, reasoning: "more time" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(mockExtendStallTimeout).toHaveBeenCalledWith(task, 600000);
-    expect(task.status).toBe("running");
+    expect(mockExtendStallTimeout).toHaveBeenCalledWith(session, 600000);
+    expect(session.status).toBe("running");
   });
 
   it("extend_timeout: falls back to 600000ms when timeoutMs is non-numeric", async () => {
-    const task = makeTask({ id: 3, status: "running" });
+    const session = makeSession({ id: "s3", status: "running" });
     const decision = { action: "extend_timeout" as const, reasoning: "more time", details: { timeoutMs: "soon" } };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(mockExtendStallTimeout).toHaveBeenCalledWith(task, 600_000);
-    expect(task.status).toBe("running");
+    expect(mockExtendStallTimeout).toHaveBeenCalledWith(session, 600_000);
+    expect(session.status).toBe("running");
   });
 
   it("mark_done: sets merging status", async () => {
-    const task = makeTask({ id: 3, status: "failed" });
+    const session = makeSession({ id: "s3", status: "failed" });
     const decision = { action: "mark_done" as const, reasoning: "work is done" };
     const ctx = makeContext();
 
-    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
-    expect(task.status).toBe("merging");
+    expect(session.status).toBe("merging");
   });
 });

@@ -1,4 +1,4 @@
-import type { Task } from "./types.js";
+import type { Session } from "./types.js";
 
 export const HIDE_CURSOR = "\x1b[?25l";
 export const SHOW_CURSOR = "\x1b[?25h";
@@ -53,8 +53,8 @@ function truncate(s: string, maxLen: number): string {
   return s.length > maxLen ? s.slice(0, maxLen - 1) + "\u2026" : s;
 }
 
-function providerTag(task: Task): string {
-  if (task.provider === "ollama") return `${YELLOW}[O]${RESET} `;
+function providerTag(provider?: string): string {
+  if (provider === "ollama") return `${YELLOW}[O]${RESET} `;
   return `${CYAN}[C]${RESET} `;
 }
 
@@ -65,16 +65,28 @@ function clipSection(lines: string[], budget: number): string[] {
   return [...lines.slice(0, budget - 1), `  ${DIM}... +${lines.length - budget + 1} more${RESET}`];
 }
 
-export function renderStatus(tasks: Task[], projectDir: string): void {
+function taskStatusGlyph(status: string): string {
+  switch (status) {
+    case "done": return `${GREEN}✓${RESET}`;
+    case "running": return `${CYAN}⋯${RESET}`;
+    case "failed": return `${RED}✗${RESET}`;
+    case "needs_human": return `${YELLOW}!${RESET}`;
+    case "merging": return `${YELLOW}↑${RESET}`;
+    case "blocked": return `${GRAY}▪${RESET}`;
+    default: return `${DIM}·${RESET}`;
+  }
+}
+
+export function renderStatus(sessions: Session[], projectDir: string): void {
   const cols = process.stdout.columns || 80;
-  const total = tasks.length;
-  const done = tasks.filter((t) => t.status === "done").length;
-  const failed = tasks.filter((t) => t.status === "failed").length;
-  const needsHuman = tasks.filter((t) => t.status === "needs_human");
-  const merging = tasks.filter((t) => t.status === "merging");
-  const running = tasks.filter((t) => t.status === "running");
-  const queued = tasks.filter((t) => t.status === "queued");
-  const blocked = tasks.filter((t) => t.status === "blocked");
+  const total = sessions.length;
+  const done = sessions.filter((s) => s.status === "done").length;
+  const failed = sessions.filter((s) => s.status === "failed").length;
+  const needsHuman = sessions.filter((s) => s.status === "needs_human");
+  const merging = sessions.filter((s) => s.status === "merging");
+  const running = sessions.filter((s) => s.status === "running");
+  const queued = sessions.filter((s) => s.status === "queued");
+  const blocked = sessions.filter((s) => s.status === "blocked");
 
   // Header section (always shown)
   const headerLines: string[] = [];
@@ -89,66 +101,70 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   );
   headerLines.push("");
 
-  // Running tasks section
+  // Running sessions section
   const runningLines: string[] = [];
   if (running.length > 0) {
     runningLines.push(`${BOLD}${CYAN}Running (${running.length}):${RESET}`);
-    for (const t of running) {
-      const elapsed = formatElapsed(t.startedAt);
-      const kb = (t.bytesReceived / 1024).toFixed(0);
-      const title = truncate(t.title, 35);
-      const turnLabel = t.turnCount === 1 ? "turn" : "turns";
-      const stageLabel = t.stage
-        ? ` ${YELLOW}${t.stage}${RESET}`
-        : (t.bytesReceived > 0 ? ` ${GRAY}Working...${RESET}` : "");
-      const stageWidth = t.stage ? t.stage.length + 1 : (t.bytesReceived > 0 ? 11 : 0);
-      const last = truncate(t.lastLine || "starting...", Math.max(1, cols - 59 - stageWidth));
+    for (const s of running) {
+      const elapsed = formatElapsed(s.startedAt);
+      const kb = (s.bytesReceived / 1024).toFixed(0);
+      const focus = truncate(s.focus, 35);
+      const turnLabel = s.turnCount === 1 ? "turn" : "turns";
+      const stageLabel = s.stage
+        ? ` ${YELLOW}${s.stage}${RESET}`
+        : (s.bytesReceived > 0 ? ` ${GRAY}Working...${RESET}` : "");
+      const stageWidth = s.stage ? s.stage.length + 1 : (s.bytesReceived > 0 ? 11 : 0);
+      const last = truncate(s.lastLine || "starting...", Math.max(1, cols - 59 - stageWidth));
       runningLines.push(
-        `  ${CYAN}T${t.id}${RESET} ${providerTag(t)}${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
+        `  ${CYAN}${s.id}${RESET} ${providerTag(s.provider)}${focus}${stageLabel}  ${GRAY}${turnLabel} ${s.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
       );
+      // Nested task status
+      for (const t of s.tasks) {
+        runningLines.push(`    ${taskStatusGlyph(t.status)} T${t.id}: ${truncate(t.title, 40)}`);
+      }
     }
     runningLines.push("");
   }
 
   if (merging.length > 0) {
     runningLines.push(`${BOLD}${YELLOW}Merging (${merging.length}):${RESET}`);
-    for (const t of merging) {
+    for (const s of merging) {
       runningLines.push(
-        `  ${YELLOW}T${t.id}${RESET} ${t.title}  ${DIM}[MERGING]${RESET}`,
+        `  ${YELLOW}${s.id}${RESET} ${s.focus}  ${DIM}[MERGING]${RESET}`,
       );
     }
     runningLines.push("");
   }
 
-  // Summary lines (queued/blocked/done)
+  // Summary lines (queued/blocked/done/needs_human)
   const summaryLines: string[] = [];
   if (queued.length > 0)
     summaryLines.push(
-      `${YELLOW}Queued (${queued.length}):${RESET} ${DIM}${queued.map((t) => `T${t.id}`).join(", ")}${RESET}`,
+      `${YELLOW}Queued (${queued.length}):${RESET} ${DIM}${queued.map((s) => s.id).join(", ")}${RESET}`,
     );
   if (blocked.length > 0)
     summaryLines.push(
-      `${GRAY}Blocked (${blocked.length}):${RESET} ${DIM}${blocked.map((t) => `T${t.id}`).join(", ")}${RESET}`,
+      `${GRAY}Blocked (${blocked.length}):${RESET} ${DIM}${blocked.map((s) => s.id).join(", ")}${RESET}`,
     );
   if (done > 0)
     summaryLines.push(
-      `${GREEN}Done (${done}):${RESET} ${DIM}${tasks
-        .filter((t) => t.status === "done")
-        .map((t) => `T${t.id}`)
+      `${GREEN}Done (${done}):${RESET} ${DIM}${sessions
+        .filter((s) => s.status === "done")
+        .map((s) => s.id)
         .join(", ")}${RESET}`,
     );
   if (needsHuman.length > 0)
     summaryLines.push(
-      `${YELLOW}Needs Human (${needsHuman.length}):${RESET} ${DIM}${needsHuman.map((t) => `T${t.id}`).join(", ")}${RESET}`,
+      `${YELLOW}Needs Human (${needsHuman.length}):${RESET} ${DIM}${needsHuman.map((s) => s.id).join(", ")}${RESET}`,
     );
 
-  // Failed tasks section
+  // Failed sessions section
   const failedLines: string[] = [];
   if (failed > 0) {
     failedLines.push(`${RED}Failed (${failed}):${RESET}`);
-    for (const t of tasks.filter((t) => t.status === "failed")) {
+    for (const s of sessions.filter((s) => s.status === "failed")) {
       failedLines.push(
-        `  ${RED}T${t.id}${RESET} ${providerTag(t)}${t.title}  ${DIM}${truncate(t.lastLine, Math.max(1, cols - 44))}${RESET}`,
+        `  ${RED}${s.id}${RESET} ${providerTag(s.provider)}${s.focus}  ${DIM}${truncate(s.lastLine, Math.max(1, cols - 44))}${RESET}`,
       );
     }
   }
@@ -156,7 +172,7 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   // Footer section (always shown)
   const footerLines: string[] = [
     "",
-    `${DIM}Logs: ${projectDir}/logs/t<N>.jsonl  (tail -f to watch)${RESET}`,
+    `${DIM}Logs: ${projectDir}/logs/s<N>.jsonl  (tail -f to watch)${RESET}`,
   ];
 
   if (isTTY()) {

@@ -22,10 +22,13 @@ import {
   buildBrief,
   buildArchitectBrief,
   buildImplementationBrief,
+  buildSessionArchitectBrief,
+  buildSessionImplementationBrief,
+  buildSessionBrief,
   formatSubagentHints,
   buildManifestExcerpt,
 } from "../src/brief.js";
-import type { Task, ModelConfig, Provider } from "../src/types.js";
+import type { Task, Session, ModelConfig, Provider } from "../src/types.js";
 import { defaultModelConfig } from "../src/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -92,6 +95,20 @@ function makeDepTask(overrides: Partial<Task> = {}): Task {
     turnCount: 5,
     lastLine: "",
     bytesReceived: 1000,
+    ...overrides,
+  };
+}
+
+function makeSession(overrides: Partial<Session> & { id: string; tasks: Task[] }): Session {
+  return {
+    focus: "Test session focus",
+    complexity: 3,
+    status: "queued",
+    bytesReceived: 0,
+    turnCount: 0,
+    lastLine: "",
+    stage: "",
+    attemptCount: 0,
     ...overrides,
   };
 }
@@ -1096,5 +1113,293 @@ describe("manifest excerpt integration", () => {
 
     expect(architectBrief).not.toContain("## Task Manifest");
     expect(implBrief).not.toContain("## Task Manifest");
+  });
+});
+
+// ─── appendMemorySnapshot regex — S{id} entries ──────────────────────────────
+
+describe("appendMemorySnapshot — S{id} entries", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+  });
+
+  it("includes memory when it contains ## S1 session entries", () => {
+    const memoryContent = "# Liteboard Memory Log\n\n## S1 - Types/config - 2026-03-13\nCompleted session S1.\n";
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
+
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Build Memory");
+    expect(brief).toContain("## S1 - Types/config");
+    expect(brief).toContain("Completed session S1.");
+  });
+
+  it("includes memory when it contains both ## T{id} and ## S{id} entries", () => {
+    const memoryContent = "# Liteboard Memory Log\n\n## T5 - Setup - 2026-03-10\nOld task.\n\n## S1 - Types - 2026-03-13\nNew session.\n";
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
+
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Build Memory");
+    expect(brief).toContain("## T5 - Setup");
+    expect(brief).toContain("## S1 - Types");
+  });
+
+  it("omits memory when it has no ## T{id} or ## S{id} entries", () => {
+    const memoryContent = "# Liteboard Memory Log\n\nNo entries yet.\n";
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
+
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("Build Memory");
+  });
+});
+
+// ─── buildSessionArchitectBrief ──────────────────────────────────────────────
+
+describe("buildSessionArchitectBrief", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("starts with architect-orientation.md content", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    const lines = brief.split("\n");
+    expect(lines[0]).toBe("# Architect Orientation");
+  });
+
+  it("includes session ID in plan output instruction", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S2", tasks: [task], focus: "Core types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS2-session-plan.md");
+    expect(brief).toMatch(/[Ww]rite.*plan/);
+  });
+
+  it("includes session focus in task context line", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Session S1: Types and config");
+  });
+
+  it("includes all task titles in the brief", () => {
+    const task1 = makeTask({ id: 1, title: "Setup types" });
+    const task2 = makeTask({ id: 2, title: "Setup config" });
+    const session = makeSession({ id: "S1", tasks: [task1, task2], focus: "Foundation" });
+    const brief = buildSessionArchitectBrief(session, [task1, task2], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Task 1: Setup types");
+    expect(brief).toContain("Task 2: Setup config");
+  });
+
+  it("includes all task requirements in the brief", () => {
+    const task = makeTask({
+      id: 1,
+      title: "Setup types",
+      requirements: ["Define Task interface", "Export all types"],
+    });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Define Task interface");
+    expect(brief).toContain("Export all types");
+  });
+
+  it("includes memory entry path in rules with session ID", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S3", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS3-memory-entry.md");
+  });
+
+  it("includes tool usage constraints", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Tool Usage Constraints");
+    expect(brief).toContain("Do NOT use Bash to execute project code");
+  });
+
+  it("does NOT include implementation phases or commit messages", () => {
+    const task = makeTask({ id: 1, title: "Setup types", commitMessage: "feat: setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).not.toContain("Phase 1: Implement");
+    expect(brief).not.toContain("Phase 2: Verify");
+    expect(brief).not.toContain("Commit message");
+    expect(brief).not.toContain("feat: setup types");
+  });
+});
+
+// ─── buildSessionImplementationBrief ─────────────────────────────────────────
+
+describe("buildSessionImplementationBrief", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("starts with agent-orientation.md content", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    const lines = brief.split("\n");
+    expect(lines[0]).toBe("# Agent Orientation");
+  });
+
+  it("includes session ID in plan path", () => {
+    const task = makeTask({ id: 1, title: "Setup types", complexity: 3 });
+    const session = makeSession({ id: "S2", tasks: [task], focus: "Core types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS2-session-plan.md");
+  });
+
+  it("skips plan path when all tasks have complexity <= LOW_COMPLEXITY_THRESHOLD", () => {
+    const task = makeTask({ id: 1, title: "Setup types", complexity: 1 });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).not.toContain("session-plan.md");
+  });
+
+  it("includes session focus in task context line", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Session S1: Types and config");
+  });
+
+  it("includes all task titles in the brief", () => {
+    const task1 = makeTask({ id: 1, title: "Setup types" });
+    const task2 = makeTask({ id: 2, title: "Setup config" });
+    const session = makeSession({ id: "S1", tasks: [task1, task2], focus: "Foundation" });
+    const brief = buildSessionImplementationBrief(session, [task1, task2], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Task 1: Setup types");
+    expect(brief).toContain("Task 2: Setup config");
+  });
+
+  it("includes commit messages for each task", () => {
+    const task1 = makeTask({ id: 1, title: "Setup types", commitMessage: "feat: add types" });
+    const task2 = makeTask({ id: 2, title: "Setup config", commitMessage: "feat: add config" });
+    const session = makeSession({ id: "S1", tasks: [task1, task2], focus: "Foundation" });
+    const brief = buildSessionImplementationBrief(session, [task1, task2], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("feat: add types");
+    expect(brief).toContain("feat: add config");
+  });
+
+  it("includes all task requirements in the brief", () => {
+    const task = makeTask({
+      id: 1,
+      title: "Setup types",
+      requirements: ["Define Task interface", "Export all types"],
+    });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Define Task interface");
+    expect(brief).toContain("Export all types");
+  });
+
+  it("includes memory entry path in rules with session ID", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S4", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS4-memory-entry.md");
+  });
+
+  it("includes TDD instruction when session has TDD tasks", () => {
+    const task = makeTask({ id: 1, title: "Setup types", tddPhase: "RED → GREEN" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("This session contains TDD tasks");
+    expect(brief).toContain("RED");
+    expect(brief).toContain("GREEN");
+  });
+
+  it("uses TDD-Exempt message when no task has a TDD phase", () => {
+    const task = makeTask({ id: 1, title: "Setup types", tddPhase: "Exempt" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("TDD-Exempt");
+    expect(brief).not.toContain("This session contains TDD tasks");
+  });
+
+  it("includes session-review and code-reviewer but NOT plan-review", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("# Session Review");
+    expect(brief).toContain("# Code Reviewer");
+    expect(brief).not.toContain("# Plan Review");
+  });
+
+  it("includes feature branch in rules", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/my-feature");
+
+    expect(brief).toContain("feat/my-feature");
+  });
+});
+
+// ─── buildSessionBrief dispatcher ────────────────────────────────────────────
+
+describe("buildSessionBrief dispatcher", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("dispatches to implementation brief for non-QA sessions", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("# Agent Orientation");
+    expect(brief).not.toContain("# QA Agent");
+  });
+
+  it("dispatches to QA brief when all tasks have type qa", () => {
+    const task = makeTask({ id: 1, title: "Validate feature", type: "qa" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "QA" });
+    const brief = buildSessionBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("# QA Agent");
+  });
+
+  it("dispatches to implementation brief when session has mixed task types", () => {
+    const implTask = makeTask({ id: 1, title: "Implement feature" });
+    const qaTask = makeTask({ id: 2, title: "QA feature", type: "qa" });
+    const session = makeSession({ id: "S1", tasks: [implTask, qaTask], focus: "Mixed" });
+    const brief = buildSessionBrief(session, [implTask, qaTask], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    // Not all tasks are QA, so uses implementation brief
+    expect(brief).toContain("# Agent Orientation");
   });
 });

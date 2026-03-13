@@ -208,6 +208,13 @@ export interface DecisionContext {
     files: string[];
     blockedDownstream: number;
   };
+  session: {
+    id: string;
+    totalTasks: number;
+    completedTasks: number;
+    remainingTasks: string[];
+    complexity: number;
+  };
   state: {
     branchExists: boolean;
     commitsAhead: number;

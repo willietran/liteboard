@@ -2,7 +2,7 @@ import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync } fr
 import { execFile } from "node:child_process";
 import * as path from "node:path";
 import type {
-  Task,
+  Session,
   DecisionContext,
   DecisionRecord,
   TriageDecision,
@@ -184,11 +184,11 @@ export function isActionLegal(
 // ─── writeDecisionRecord ──────────────────────────────────────────────────────
 
 export function writeDecisionRecord(
-  taskId: number,
+  sessionId: string,
   record: DecisionRecord,
   projectDir: string,
 ): void {
-  const filePath = path.join(artifactsDir(projectDir), `t${taskId}-decisions.jsonl`);
+  const filePath = path.join(artifactsDir(projectDir), `s${sessionId}-decisions.jsonl`);
   const line = JSON.stringify(record) + "\n";
   writeWithMkdir(filePath, () => appendFileSync(filePath, line, "utf-8"));
 }
@@ -196,10 +196,10 @@ export function writeDecisionRecord(
 // ─── readDecisionHistory ──────────────────────────────────────────────────────
 
 export function readDecisionHistory(
-  taskId: number,
+  sessionId: string,
   projectDir: string,
 ): DecisionRecord[] {
-  const filePath = path.join(artifactsDir(projectDir), `t${taskId}-decisions.jsonl`);
+  const filePath = path.join(artifactsDir(projectDir), `s${sessionId}-decisions.jsonl`);
   let content: string;
   try {
     content = readFileSync(filePath, "utf-8");
@@ -221,11 +221,11 @@ export function readDecisionHistory(
 // ─── logTriageResponse ────────────────────────────────────────────────────────
 
 export function logTriageResponse(
-  taskId: number,
+  sessionId: string,
   stdout: string,
   projectDir: string,
 ): void {
-  const filePath = path.join(artifactsDir(projectDir), `t${taskId}-triage-response.log`);
+  const filePath = path.join(artifactsDir(projectDir), `s${sessionId}-triage-response.log`);
   const entry = `--- ${new Date().toISOString()} ---\n${stdout}\n\n`;
   writeWithMkdir(filePath, () => appendFileSync(filePath, entry, "utf-8"));
 }
@@ -233,12 +233,12 @@ export function logTriageResponse(
 // ─── writeEscalation ──────────────────────────────────────────────────────────
 
 export function writeEscalation(
-  task: Task,
+  session: Session,
   decision: TriageDecision,
   context: DecisionContext,
   projectDir: string,
 ): void {
-  const filePath = path.join(artifactsDir(projectDir), `t${task.id}-escalation.md`);
+  const filePath = path.join(artifactsDir(projectDir), `s${session.id}-escalation.md`);
 
   const historySection =
     context.history.length > 0
@@ -250,7 +250,7 @@ export function writeEscalation(
           .join("\n")
       : "No previous attempts.";
 
-  const content = `# Escalation: Task ${task.id} — ${task.title}
+  const content = `# Escalation: Session ${session.id} — ${session.focus}
 
 ## Failure Context
 
@@ -264,7 +264,7 @@ export function writeEscalation(
 ${context.trigger.errorTail || "(no output captured)"}
 \`\`\`
 
-## Task State
+## Session State
 
 - **Branch Exists:** ${context.state.branchExists}
 - **Commits Ahead:** ${context.state.commitsAhead}
@@ -284,7 +284,7 @@ ${decision.reasoning}
 
 1. Check the error output above for root cause
 2. If the branch has useful work (\`commitsAhead: ${context.state.commitsAhead}\`), consider manual merge
-3. If the task is non-critical, mark as skipped in progress.md
+3. If the session is non-critical, mark as skipped in progress.md
 4. Re-run with \`--resume\` after fixing the underlying issue
 `;
 
@@ -349,19 +349,19 @@ Respond with ONLY a JSON object:
 // ─── gatherDecisionContext ────────────────────────────────────────────────────
 
 export async function gatherDecisionContext(
-  task: Task,
-  allTasks: Task[],
+  session: Session,
+  allSessions: Session[],
   featureBranch: string,
   projectDir: string,
   concurrencyLimit: number,
   trigger: { stage: FailureStage; exitCode: number; errorClass?: ErrorClass },
 ): Promise<DecisionContext> {
   const slug = path.basename(projectDir);
-  const taskBranch = `${featureBranch}-t${task.id}`;
-  const wtPath = task.worktreePath ?? getWorktreePath(slug, task.id);
+  const sessionBranch = `${featureBranch}-s${session.id}`;
+  const wtPath = session.worktreePath ?? getWorktreePath(slug, session.id);
 
   // ── Branch state ──────────────────────────────────────────────────────────
-  const branchListResult = git(["branch", "--list", taskBranch]);
+  const branchListResult = git(["branch", "--list", sessionBranch]);
   const branchExists = branchListResult.length > 0;
 
   let commitsAhead = 0;
@@ -369,14 +369,14 @@ export async function gatherDecisionContext(
   if (branchExists) {
     try {
       commitsAhead = parseInt(
-        git(["rev-list", "--count", `${featureBranch}..${taskBranch}`]),
+        git(["rev-list", "--count", `${featureBranch}..${sessionBranch}`]),
         10,
       );
     } catch {
       commitsAhead = 0;
     }
     try {
-      diffStat = git(["diff", "--stat", `${featureBranch}..${taskBranch}`]);
+      diffStat = git(["diff", "--stat", `${featureBranch}..${sessionBranch}`]);
     } catch {
       diffStat = "";
     }
@@ -395,31 +395,46 @@ export async function gatherDecisionContext(
   }
 
   // ── Plan and attempt state ────────────────────────────────────────────────
-  const planPath = path.join(artifactsDir(projectDir), `t${task.id}-task-plan.md`);
+  const planPath = path.join(artifactsDir(projectDir), `s${session.id}-session-plan.md`);
   const planExists = existsSync(planPath);
-  const history = readDecisionHistory(task.id, projectDir);
-  // attemptCount = number of past triage decisions recorded for this task.
-  // Callers (T7) derive attemptNumber for new records as: state.attemptCount + 1.
-  const attemptCount = history.length;
+  const history = readDecisionHistory(session.id, projectDir);
+  const attemptCount = session.attemptCount;
 
   // ── Error tail ────────────────────────────────────────────────────────────
-  const recentOutput = getRecentOutput(task);
+  const recentOutput = getRecentOutput(session);
   let errorTail: string;
   if (recentOutput.length > 0) {
     errorTail = recentOutput.join("\n");
-  } else if (task.logPath && existsSync(task.logPath)) {
+  } else if (session.logPath && existsSync(session.logPath)) {
     // Log file is JSONL (raw provider stream chunks mixed with stderr lines).
     // Last 30 lines may include partial JSON — errorTail is descriptive, not machine-parsed.
-    const content = readFileSync(task.logPath, "utf-8");
+    const content = readFileSync(session.logPath, "utf-8");
     errorTail = content.split("\n").slice(-30).join("\n");
   } else {
     errorTail = "";
   }
 
   // ── Counts ────────────────────────────────────────────────────────────────
-  const runningTasks = allTasks.filter((t) => t.status === "running").length;
-  const freeSlots = concurrencyLimit - runningTasks;
-  const blockedDownstream = allTasks.filter((t) => t.dependsOn.includes(task.id)).length;
+  const runningSessions = allSessions.filter((s) => s.status === "running").length;
+  const freeSlots = concurrencyLimit - runningSessions;
+
+  // A session is blocked downstream if any of its tasks depend on any task in this session.
+  const sessionTaskIds = new Set(session.tasks.map((t) => t.id));
+  const blockedDownstream = allSessions.filter((s) =>
+    s !== session && s.tasks.some((t) => t.dependsOn.some((dep) => sessionTaskIds.has(dep))),
+  ).length;
+
+  // Populate task field from the first task in the session (representative context).
+  const representativeTask = session.tasks[0] ?? {
+    id: 0,
+    title: session.focus,
+    type: undefined,
+    tddPhase: "" as const,
+    complexity: session.complexity,
+    requirements: [],
+    creates: [],
+    modifies: [],
+  };
 
   return {
     trigger: {
@@ -429,14 +444,21 @@ export async function gatherDecisionContext(
       errorClass: trigger.errorClass,
     },
     task: {
-      id: task.id,
-      title: task.title,
-      type: task.type ?? "",
-      tddPhase: task.tddPhase,
-      complexity: task.complexity,
-      requirements: task.requirements,
-      files: [...task.creates, ...task.modifies],
+      id: representativeTask.id,
+      title: representativeTask.title,
+      type: representativeTask.type ?? "",
+      tddPhase: representativeTask.tddPhase,
+      complexity: representativeTask.complexity,
+      requirements: representativeTask.requirements,
+      files: [...representativeTask.creates, ...representativeTask.modifies],
       blockedDownstream,
+    },
+    session: {
+      id: session.id,
+      totalTasks: session.tasks.length,
+      completedTasks: session.tasks.filter((t) => t.status === "done").length,
+      remainingTasks: session.tasks.filter((t) => t.status !== "done").map((t) => t.title),
+      complexity: session.complexity,
     },
     state: {
       branchExists,
@@ -446,7 +468,7 @@ export async function gatherDecisionContext(
       worktreeClean,
       planExists,
       attemptCount,
-      runningTasks,
+      runningTasks: runningSessions,
       freeSlots,
     },
     history,
@@ -496,7 +518,7 @@ export async function askTriage(
 
     try {
       const stdout = await spawnTriageAgent(prompt, model);
-      logTriageResponse(context.task.id, stdout, projectDir);
+      logTriageResponse(context.session.id, stdout, projectDir);
       const decision = parseTriageResponse(stdout);
 
       if (!isActionLegal(decision.action, context.state, context.trigger.stage)) {
@@ -518,76 +540,79 @@ export async function askTriage(
 
 // ─── executeTriageAction ──────────────────────────────────────────────────────
 
-/** Reset task fields for re-entry into the scheduling pipeline. */
-function resetTaskForRetry(task: Task): void {
-  task.stage = "";
-  task.lastLine = "";
-  task.turnCount = 0;
-  task.bytesReceived = 0;
+/** Reset session fields for re-entry into the scheduling pipeline. */
+function resetSessionForRetry(session: Session): void {
+  session.stage = "";
+  session.lastLine = "";
+  session.turnCount = 0;
+  session.bytesReceived = 0;
 }
 
 export async function executeTriageAction(
-  task: Task,
+  session: Session,
   decision: TriageDecision,
   context: DecisionContext,
   slug: string,
   featureBranch: string,
   projectDir: string,
-  allTasks: Task[],
+  allSessions: Session[],
   verbose: boolean,
 ): Promise<void> {
   switch (decision.action) {
     case "retry_from_scratch":
       // Full restart: clean worktree+branch and re-queue from scratch.
       // attemptCount tracks full restarts (not resume/reuse which preserve work).
-      cleanupWorktree(slug, task.id, featureBranch, verbose, { preserveBranch: false });
-      task.status = "queued";
-      resetTaskForRetry(task);
-      task.attemptCount = (task.attemptCount ?? 0) + 1;
+      cleanupWorktree(slug, session.id, featureBranch, verbose, { preserveBranch: false });
+      session.status = "queued";
+      resetSessionForRetry(session);
+      session.attemptCount = session.attemptCount + 1;
       break;
 
     case "resume_from_branch": {
       // Preserve existing branch and commits. Re-attach worktree if cleaned up.
-      const wtPath = task.worktreePath ?? getWorktreePath(slug, task.id);
+      const wtPath = session.worktreePath ?? getWorktreePath(slug, session.id);
       if (!existsSync(wtPath)) {
-        task.worktreePath = recreateWorktreeFromBranch(slug, task.id, featureBranch, verbose);
+        session.worktreePath = recreateWorktreeFromBranch(slug, session.id, featureBranch, verbose);
       } else {
-        // Normalize task.worktreePath so downstream code always has the path set.
-        task.worktreePath = wtPath;
+        // Normalize session.worktreePath so downstream code always has the path set.
+        session.worktreePath = wtPath;
       }
-      task.status = "queued";
-      task.skipArchitect = true;
-      resetTaskForRetry(task);
+      session.status = "queued";
+      session.skipArchitect = true;
+      resetSessionForRetry(session);
       break;
     }
 
     case "retry_merge_only":
       // Keep branch/commits, re-attempt merge only. Main loop detects "merging" state.
-      task.status = "merging";
+      session.status = "merging";
       break;
 
     case "skip_and_continue": {
-      task.status = "done";
-      task.lastLine = `[SKIPPED] ${decision.reasoning}`;
-      const blockedCount = allTasks.filter((t) => t.dependsOn.includes(task.id)).length;
+      session.status = "done";
+      session.lastLine = `[SKIPPED] ${decision.reasoning}`;
+      const sessionTaskIds = new Set(session.tasks.map((t) => t.id));
+      const blockedCount = allSessions.filter((s) =>
+        s !== session && s.tasks.some((t) => t.dependsOn.some((dep) => sessionTaskIds.has(dep))),
+      ).length;
       if (blockedCount > 0) {
         console.warn(
-          `[triage] Task ${task.id} skipped with ${blockedCount} downstream dependent(s) blocked`,
+          `[triage] Session ${session.id} skipped with ${blockedCount} downstream session(s) blocked`,
         );
       }
       break;
     }
 
     case "escalate":
-      writeEscalation(task, decision, context, projectDir);
-      task.status = "needs_human";
+      writeEscalation(session, decision, context, projectDir);
+      session.status = "needs_human";
       break;
 
     case "reuse_plan":
       // Keep existing plan, skip architect, go straight to implementation.
-      task.status = "queued";
-      task.skipArchitect = true;
-      resetTaskForRetry(task);
+      session.status = "queued";
+      session.skipArchitect = true;
+      resetSessionForRetry(session);
       break;
 
     case "extend_timeout": {
@@ -595,14 +620,14 @@ export async function executeTriageAction(
       // Guard against NaN (LLM could return a non-numeric string) to prevent
       // silently disabling stall detection with an invalid timeout.
       const durationMs = Number.isFinite(parsed) ? parsed : 600_000;
-      extendStallTimeout(task, durationMs);
-      // No status change — task remains running with extended timeout.
+      extendStallTimeout(session, durationMs);
+      // No status change — session remains running with extended timeout.
       break;
     }
 
     case "mark_done":
       // Attempt squash merge of existing branch. Main loop detects "merging" state.
-      task.status = "merging";
+      session.status = "merging";
       break;
 
     default: {
