@@ -23,27 +23,27 @@ describe("appendMemoryEntry (mocked)", () => {
   it("creates memory.md with header if the file does not exist", async () => {
     (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
-    await appendMemoryEntry("/fake/project", 1, "Setup DB", "Created schema.");
+    await appendMemoryEntry("/fake/project", "1", "Setup DB", "Created schema.");
 
     expect(writeFileSync).toHaveBeenCalled();
     const writtenContent = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
     expect(writtenContent).toContain("# Liteboard Memory Log");
   });
 
-  it("appends entry with correct format: ## T<id> - <title> - <ISO timestamp> followed by body", async () => {
+  it("appends entry with correct format: ## S<id> - <focus> - <ISO timestamp> followed by body", async () => {
     (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
-    await appendMemoryEntry("/fake/project", 42, "Add auth", "JWT tokens configured.");
+    await appendMemoryEntry("/fake/project", "42", "Add auth", "JWT tokens configured.");
 
     const writtenContent = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-    expect(writtenContent).toMatch(/## T42 - Add auth - \d{4}-\d{2}-\d{2}T/);
+    expect(writtenContent).toMatch(/## S42 - Add auth - \d{4}-\d{2}-\d{2}T/);
     expect(writtenContent).toContain("JWT tokens configured.");
   });
 
   it("uses atomic write via temp file + rename", async () => {
     (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
-    await appendMemoryEntry("/fake/project", 1, "Task", "Body");
+    await appendMemoryEntry("/fake/project", "1", "Task", "Body");
 
     expect(writeFileSync).toHaveBeenCalledTimes(1);
     const tempPath = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
@@ -55,14 +55,14 @@ describe("appendMemoryEntry (mocked)", () => {
     expect((dest as string).endsWith("memory.md")).toBe(true);
   });
 
-  it("entry format includes task id, title, and timestamp", async () => {
+  it("entry format includes session id, focus, and timestamp", async () => {
     (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue("# Liteboard Memory Log\n\n");
 
-    await appendMemoryEntry("/fake/project", 7, "Deploy API", "Deployed to staging.");
+    await appendMemoryEntry("/fake/project", "7", "Deploy API", "Deployed to staging.");
 
     const writtenContent = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-    expect(writtenContent).toContain("T7");
+    expect(writtenContent).toContain("S7");
     expect(writtenContent).toContain("Deploy API");
     expect(writtenContent).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(writtenContent).toContain("Deployed to staging.");
@@ -85,7 +85,7 @@ describe("readMemorySnapshot (mocked)", () => {
   });
 
   it("returns content of memory.md", () => {
-    const content = "# Liteboard Memory Log\n\n## T1 - Init - 2025-01-01T00:00:00.000Z\nDone.\n";
+    const content = "# Liteboard Memory Log\n\n## S1 - Init - 2025-01-01T00:00:00.000Z\nDone.\n";
     (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(content);
 

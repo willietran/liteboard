@@ -5,6 +5,7 @@ import { git } from "./git.js";
 import { createMutex } from "./mutex.js";
 import { getErrorMessage, getErrorStderr } from "./errors.js";
 import { runBuildValidation, NPM_TIMEOUT_MS } from "./build-validation.js";
+import type { Session } from "./types.js";
 
 // ─── Merge serialization lock ────────────────────────────────────────────────
 
@@ -12,26 +13,19 @@ const serialize = createMutex();
 
 // ─── resetAndThrow helper ───────────────────────────────────────────────────
 
-function resetAndThrow(
-  taskId: number,
-  label: string,
-  error: unknown,
-  verbose: boolean,
-): never {
+function resetAndThrow(error: unknown, verbose: boolean): never {
   try {
     git(["reset", "--hard", "HEAD"], { verbose });
   } catch (resetErr) {
-    console.error(`[merger] git reset also failed for task ${taskId}: ${getErrorMessage(resetErr)}`);
+    console.error(`[merger] git reset also failed: ${getErrorMessage(resetErr)}`);
   }
-  throw new Error(
-    `${label} failed for task ${taskId}: ${getErrorStderr(error) || getErrorMessage(error)}`,
-  );
+  throw new Error(getErrorStderr(error) || getErrorMessage(error));
 }
 
 // ─── commitViaFile helper ─────────────────────────────────────────────────────
 
-function commitViaFile(taskId: number, message: string, verbose: boolean): void {
-  const msgFile = path.join(tmpdir(), `commit-msg-${taskId}.txt`);
+function commitViaFile(sessionId: string, message: string, verbose: boolean): void {
+  const msgFile = path.join(tmpdir(), `commit-msg-s${sessionId}.txt`);
   fs.writeFileSync(msgFile, message);
   try {
     git(["commit", "-F", msgFile], { verbose });
@@ -40,23 +34,35 @@ function commitViaFile(taskId: number, message: string, verbose: boolean): void 
   }
 }
 
+// ─── buildCommitMessage ───────────────────────────────────────────────────────
+
+function buildCommitMessage(session: Session): string {
+  if (session.tasks.length === 1) {
+    return session.tasks[0].commitMessage;
+  }
+  const lines = session.tasks.map(t => `- task ${t.id}: ${t.commitMessage}`).join("\n");
+  return `session S${session.id}: ${session.focus}\n\n${lines}`;
+}
+
 // ─── squashMerge ─────────────────────────────────────────────────────────────
 
 export async function squashMerge(
-  taskId: number,
+  session: Session,
   featureBranch: string,
-  commitMessage: string,
   verbose: boolean,
 ): Promise<void> {
   return serialize(async () => {
-    const taskBranch = `${featureBranch}-t${taskId}`;
+    const sessionBranch = session.branchName ?? `${featureBranch}-s${session.id}`;
+    const commitMessage = buildCommitMessage(session);
+    const ephemeralFiles = [".memory-entry.md", `.brief-s${session.id}.md`, ".qa-report.md"];
+
     try {
       // Guard: reset current HEAD if dirty (may be on any branch after a crash).
       // A prior failed merge may have left MERGE_HEAD, staged changes, or
-      // an in-progress merge/rebase state on the current or a task branch.
+      // an in-progress merge/rebase state on the current or a session branch.
       const status = git(["status", "--porcelain"], { verbose });
       if (status.length > 0) {
-        console.error(`[merger] dirty index detected before merge for task ${taskId}, resetting`);
+        console.error(`[merger] dirty index detected before merge for session ${session.id}, resetting`);
         try { git(["merge", "--abort"], { verbose }); } catch {}
         try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
       }
@@ -68,27 +74,26 @@ export async function squashMerge(
       git(["checkout", featureBranch], { verbose });
 
       // Defense-in-depth: clean up ephemeral files that agents may have committed
-      // to the task branch despite being instructed to write to the artifacts directory.
-      const ephemeralFiles = [".memory-entry.md", `.brief-t${taskId}.md`, ".qa-report.md"];
+      // to the session branch despite being instructed to write to the artifacts directory.
       for (const f of ephemeralFiles) {
         try { fs.unlinkSync(f); } catch {}
       }
 
       try {
-        git(["merge", "--squash", "--no-commit", taskBranch], { verbose });
+        git(["merge", "--squash", "--no-commit", sessionBranch], { verbose });
       } catch {
         // Step 2: Conflict resolution
         try {
           // All conflicts fail the merge — triage decides recovery strategy.
-          // Abort, squash task branch, rebase, retry.
+          // Abort, squash session branch, rebase, retry.
           // --squash does not create MERGE_HEAD, so merge --abort won't work.
           // reset --hard restores the feature branch to its pre-merge state.
           git(["reset", "--hard", "HEAD"], { verbose });
 
-          // Squash task branch to a single commit
-          git(["checkout", taskBranch], { verbose });
+          // Squash session branch to a single commit
+          git(["checkout", sessionBranch], { verbose });
           git(["reset", "--soft", featureBranch], { verbose });
-          commitViaFile(taskId, `squashed: ${commitMessage}`, verbose);
+          commitViaFile(session.id, `squashed: ${commitMessage}`, verbose);
 
           // Rebase onto feature branch
           try {
@@ -96,13 +101,13 @@ export async function squashMerge(
           } catch {
             git(["rebase", "--abort"], { verbose });
             throw new Error(
-              `Rebase conflicts for task ${taskId} — marking failed`,
+              `Rebase conflicts for session ${session.id} — marking failed`,
             );
           }
 
           // Retry trial merge
           git(["checkout", featureBranch], { verbose });
-          git(["merge", "--squash", "--no-commit", taskBranch], { verbose });
+          git(["merge", "--squash", "--no-commit", sessionBranch], { verbose });
         } catch (resolveErr) {
           try {
             git(["reset", "--hard", "HEAD"], { verbose });
@@ -140,11 +145,14 @@ export async function squashMerge(
           test: "Test suite",
         };
         const label = phaseLabels[buildResult.failedPhase] || buildResult.failedPhase;
-        resetAndThrow(taskId, label, new Error(buildResult.stderr || buildResult.error || "unknown error"), verbose);
+        resetAndThrow(
+          new Error(`${label} failed for session ${session.id}: ${buildResult.stderr || buildResult.error || "unknown error"}`),
+          verbose,
+        );
       }
 
       // Step 4: Commit
-      commitViaFile(taskId, commitMessage, verbose);
+      commitViaFile(session.id, commitMessage, verbose);
     } catch (e) {
       // Recovery: ensure feature branch is clean for the next queued merge.
       // Note: resetAndThrow() already calls reset --hard for build failures,
