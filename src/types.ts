@@ -1,5 +1,10 @@
 import type { ChildProcess } from "node:child_process";
 
+// ─── Complexity ───────────────────────────────────────────────────────────
+
+/** Tasks at or below this complexity skip the architect phase and go directly to implementation. */
+export const LOW_COMPLEXITY_THRESHOLD = 2;
+
 // ─── Task Status ──────────────────────────────────────────────────────────
 
 export type TaskStatus =

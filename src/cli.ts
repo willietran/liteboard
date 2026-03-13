@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Task, CLIArgs } from "./types.js";
-import { defaultModelConfig } from "./types.js";
+import { defaultModelConfig, LOW_COMPLEXITY_THRESHOLD } from "./types.js";
 import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
@@ -507,7 +507,33 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Non-QA tasks: two-phase architect → implementation
+    // Low-complexity tasks: single-phase implementation (no architect)
+    if (task.complexity <= LOW_COMPLEXITY_THRESHOLD) {
+      task.provider = args.models.implementation.provider;
+      let child: ReturnType<typeof spawnAgent>;
+      try {
+        const brief = buildImplementationBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+        const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
+        child = spawnAgent(task, brief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
+        task.process = child;
+      } catch (e: unknown) {
+        task.status = "failed";
+        task.stage = "";
+        task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+        cleanupWorktree(slug, task.id, args.branch, args.verbose);
+        writeProgress(filteredTasks, args.projectPath);
+        updateStatuses();
+        return;
+      }
+
+      const promise = new Promise<void>((resolve) => {
+        child.on("close", (code) => handleFinalClose(code, resolve));
+      });
+      activePromises.set(task.id, promise);
+      return;
+    }
+
+    // Non-QA, higher-complexity tasks: two-phase architect → implementation
     task.provider = args.models.architect.provider;
     let architectChild: ReturnType<typeof spawnAgent>;
     try {

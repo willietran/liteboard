@@ -282,6 +282,38 @@ describe("buildImplementationBrief", () => {
     expect(brief).toMatch(/[Rr]ead.*plan/);
   });
 
+  it("includes plan read instruction for complexity > 2", () => {
+    const task = makeTask({ complexity: 3 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).toContain("Task plan");
+    expect(brief).toContain("task-plan.md");
+  });
+
+  it("skips plan read instruction for complexity 2", () => {
+    const task = makeTask({ complexity: 2 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).not.toContain("Task plan");
+    expect(brief).not.toContain("task-plan.md");
+  });
+
+  it("skips plan read instruction for complexity 1", () => {
+    const task = makeTask({ complexity: 1 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).not.toContain("Task plan");
+    expect(brief).not.toContain("task-plan.md");
+  });
+
+  it("skips plan read instruction for complexity 0", () => {
+    const task = makeTask({ complexity: 0 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+
+    expect(brief).not.toContain("Task plan");
+    expect(brief).not.toContain("task-plan.md");
+  });
+
   it("includes TDD phase in workflow when set", () => {
     const task = makeTask({ tddPhase: "RED → GREEN" });
     const brief = buildImplementationBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");

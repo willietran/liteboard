@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { defaultModelConfig } from "../src/types.js";
+import { defaultModelConfig, LOW_COMPLEXITY_THRESHOLD } from "../src/types.js";
+
+describe("LOW_COMPLEXITY_THRESHOLD", () => {
+  it("is exported as 2", () => {
+    expect(LOW_COMPLEXITY_THRESHOLD).toBe(2);
+  });
+});
 
 describe("defaultModelConfig", () => {
   it("returns an object with exactly 3 agent roles", () => {

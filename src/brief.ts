@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task, ModelConfig, Provider } from "./types.js";
+import { LOW_COMPLEXITY_THRESHOLD } from "./types.js";
 import { readMemorySnapshot } from "./memory.js";
 import { artifactsDir } from "./paths.js";
 
@@ -238,10 +239,12 @@ export function buildImplementationBrief(
   parts.push(`- Task manifest: \`${manifestPath}\``);
   parts.push("");
 
-  // 6. Plan read instruction
-  parts.push(`**Task plan** (read before implementing):`);
-  parts.push(`- Read the approved plan from \`${artDir}/t${task.id}-task-plan.md\``);
-  parts.push("");
+  // 6. Plan read instruction (only when architect phase produced a plan)
+  if (task.complexity > LOW_COMPLEXITY_THRESHOLD) {
+    parts.push(`**Task plan** (read before implementing):`);
+    parts.push(`- Read the approved plan from \`${artDir}/t${task.id}-task-plan.md\``);
+    parts.push("");
+  }
 
   // 7. Memory snapshot
   appendMemorySnapshot(parts, projectDir);
