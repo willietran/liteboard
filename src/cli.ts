@@ -2,10 +2,10 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task, CLIArgs } from "./types.js";
+import type { Session, Task, CLIArgs } from "./types.js";
 import { defaultModelConfig } from "./types.js";
-import { parseManifest } from "./parser.js";
-import { topologicalSort, hasFileConflict } from "./resolver.js";
+import { parseManifest, parseSessions } from "./parser.js";
+import { topologicalSort, resolveSessionDependencies, hasSessionFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
 import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, checkOllamaModel, pullOllamaModel } from "./provider.js";
 import { parseProjectConfig, validateConfig, hasOllamaProvider, applyOllamaFallback } from "./config.js";
@@ -25,9 +25,9 @@ import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, ENTER_
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
 import {
-  spawnTask as runTask,
-  handleMergingTask,
-  type TaskRunnerContext,
+  spawnSession,
+  handleMergingSession,
+  type SessionRunnerContext,
 } from "./task-runner.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ function ensureGitignores(projectDir: string): void {
   if (fs.existsSync(repoGitignore)) {
     const content = fs.readFileSync(repoGitignore, "utf-8");
     const additions: string[] = [];
-    if (!content.includes(".brief-t")) additions.push(".brief-t*.md");
+    if (!content.includes(".brief-s")) additions.push(".brief-s*.md");
     if (!content.includes(".memory-entry")) additions.push(".memory-entry.md");
     if (!content.includes(".qa-report")) additions.push(".qa-report.md");
     if (additions.length > 0) {
@@ -276,40 +276,44 @@ async function main(): Promise<void> {
   const tasks = parseManifest(manifestPath);
   if (tasks.length === 0) die("No tasks found in manifest.");
 
-  // Apply task filter
-  // allTasks retains the full manifest for progress writes; filteredTasks drives scheduling.
   const allTasks = tasks;
   let filteredTasks = tasks;
+
+  // Apply task filter
   if (args.taskFilter) {
     const filterSet = new Set(args.taskFilter);
     filteredTasks = tasks.filter(t => filterSet.has(t.id));
     if (filteredTasks.length === 0) die("No tasks match the filter.");
-    // Adjust: tasks not in filter that are deps should be treated as done
     for (const t of filteredTasks) {
       t.dependsOn = t.dependsOn.filter(d => filterSet.has(d));
-      if (t.dependsOn.length === 0 && t.status === "blocked") {
-        t.status = "queued";
-      }
+      if (t.dependsOn.length === 0 && t.status === "blocked") t.status = "queued";
     }
   }
 
-  // Resolve dependency layers
+  // Build layer map for session validation
   const layers = topologicalSort(filteredTasks);
-
-  // Dry-run: show graph and exit
-  if (args.dryRun) {
-    console.log("\n\x1b[1mDependency Layers:\x1b[0m\n");
-    for (const layer of layers) {
-      const taskNames = layer.taskIds
-        .map(id => {
-          const t = filteredTasks.find(t => t.id === id);
-          return t ? `T${t.id}: ${t.title}` : `T${id}`;
-        })
-        .join(", ");
-      console.log(`  Layer ${layer.layerIndex}: ${taskNames}`);
+  const taskLayerMap = new Map<number, number>();
+  for (const layer of layers) {
+    for (const taskId of layer.taskIds) {
+      taskLayerMap.set(taskId, layer.layerIndex);
     }
-    console.log(`\n  Total: ${filteredTasks.length} tasks, ${layers.length} layers`);
-    console.log(`  Max parallelism: ${Math.max(...layers.map(l => l.taskIds.length))}\n`);
+  }
+
+  // Build sessions
+  let filteredSessions = parseSessions(filteredTasks, manifestContent, taskLayerMap);
+  const allSessions = parseSessions(allTasks, manifestContent);
+  const sessionDeps = resolveSessionDependencies(filteredSessions);
+
+  // Dry-run: show sessions and exit
+  if (args.dryRun) {
+    console.log("\n\x1b[1mSession Schedule:\x1b[0m\n");
+    for (const session of filteredSessions) {
+      const taskIds = session.tasks.map(t => `T${t.id}`).join(", ");
+      const layerIndex = session.tasks.length > 0 ? (taskLayerMap.get(session.tasks[0].id) ?? 0) : 0;
+      console.log(`  Session ${session.id} (Layer ${layerIndex}): ${session.focus} [${taskIds}]`);
+    }
+    const totalTasks = filteredSessions.reduce((sum, s) => sum + s.tasks.length, 0);
+    console.log(`\n  Total: ${filteredSessions.length} sessions, ${totalTasks} tasks, ${layers.length} layers\n`);
     process.exit(0);
   }
 
@@ -320,8 +324,9 @@ async function main(): Promise<void> {
   const previousProgress = readProgress(args.projectPath);
   const gitCompleted = detectCompletedFromGitLog(args.branch, allTasks, args.verbose);
 
+  // Apply task-level resume
   for (const t of allTasks) {
-    const progressEntry = previousProgress.get(t.id);
+    const progressEntry = previousProgress.tasks.get(t.id);
     if (progressEntry?.status === "needs_human") {
       t.status = "needs_human";
     } else if (progressEntry?.status === "done") {
@@ -333,17 +338,48 @@ async function main(): Promise<void> {
     }
   }
 
-  // Unblock tasks whose deps are all done
-  function updateStatuses(): void {
-    const taskById = new Map(filteredTasks.map(t => [t.id, t]));
-    for (const t of filteredTasks) {
-      if (t.status === "blocked") {
-        const allDepsDone = t.dependsOn.every(depId => {
-          const dep = taskById.get(depId);
-          return dep?.status === "done";
-        });
-        if (allDepsDone) t.status = "queued";
+  // Apply session-level resume
+  for (const s of filteredSessions) {
+    const sessionEntry = previousProgress.sessions.get(s.id);
+    if (sessionEntry?.status === "needs_human") {
+      s.status = "needs_human";
+    } else if (sessionEntry?.status === "done") {
+      s.status = "done";
+      s.completedAt = sessionEntry.completedAt;
+      // Also mark constituent tasks as done
+      for (const t of s.tasks) {
+        if (t.status !== "done") {
+          t.status = "done";
+          t.completedAt = sessionEntry.completedAt;
+        }
       }
+    }
+  }
+
+  // Unblock sessions whose deps are all done
+  function updateStatuses(): void {
+    // Update task statuses within sessions
+    for (const s of filteredSessions) {
+      for (const t of s.tasks) {
+        if (t.status === "blocked") {
+          const allDepsDone = t.dependsOn.every(depId => {
+            const dep = allTasks.find(x => x.id === depId);
+            return dep?.status === "done";
+          });
+          if (allDepsDone) t.status = "queued";
+        }
+      }
+    }
+
+    // Update session statuses based on session-level deps
+    for (const s of filteredSessions) {
+      if (s.status !== "queued" && s.status !== "blocked") continue;
+      const deps = sessionDeps.get(s.id) ?? [];
+      const allDepsDone = deps.every(depId => {
+        const dep = filteredSessions.find(x => x.id === depId);
+        return dep?.status === "done";
+      });
+      s.status = allDepsDone ? "queued" : "blocked";
     }
   }
   updateStatuses();
@@ -355,27 +391,28 @@ async function main(): Promise<void> {
   const provider = createProvider("claude");
 
   // Active promises
-  const activePromises = new Map<number, Promise<void>>();
-  const qaReports = new Map<number, string>();
+  const activePromises = new Map<string, Promise<void>>();
+  const qaReports = new Map<string, string>();
   let shuttingDown = false;
 
   function printQAReports(): void {
     if (qaReports.size === 0) return;
     console.log("");
-    for (const [taskId, report] of qaReports) {
-      const task = filteredTasks.find(t => t.id === taskId);
-      const title = task?.title ?? "QA Validation";
-      console.log(`\x1b[1mT${taskId}: ${title}\x1b[0m`);
+    for (const [sessionId, report] of qaReports) {
+      const session = filteredSessions.find(s => s.id === sessionId);
+      const title = session?.focus ?? "QA Validation";
+      console.log(`\x1b[1mS${sessionId}: ${title}\x1b[0m`);
       console.log(report);
     }
   }
 
-  // ─── Task Runner Context ────────────────────────────────────────────────
+  // ─── Session Runner Context ────────────────────────────────────────────────
 
-  const ctx: TaskRunnerContext = {
+  const ctx: SessionRunnerContext = {
     args,
     slug,
-    filteredTasks,
+    filteredSessions,
+    allSessions,
     allTasks,
     designDoc,
     manifestContent,
@@ -384,33 +421,34 @@ async function main(): Promise<void> {
     activePromises,
     qaReports,
     updateStatuses,
+    sessionDeps,
   };
 
   // Startup validation: detect stale branches from previous runs and invoke triage
   {
     const existingBranches = new Set<string>();
     try {
-      const branchList = git(["branch", "--list", `${args.branch}-t*`], { verbose: args.verbose });
+      const branchList = git(["branch", "--list", `${args.branch}-s*`], { verbose: args.verbose });
       for (const line of branchList.split("\n")) {
         const name = line.trim().replace(/^\* /, "");
         if (name) existingBranches.add(name);
       }
     } catch {}
 
-    for (const task of filteredTasks) {
-      if (task.status === "done" || task.status === "needs_human") continue;
-      const taskBranch = `${args.branch}-t${task.id}`;
-      if (!existingBranches.has(taskBranch)) continue;
+    for (const session of filteredSessions) {
+      if (session.status === "done" || session.status === "needs_human") continue;
+      const sessionBranch = session.branchName ?? `${args.branch}-s${session.id}`;
+      if (!existingBranches.has(sessionBranch)) continue;
 
-      // This task has a branch from a previous run but wasn't marked done
-      log(`Stale branch detected for T${task.id}, invoking triage for recovery assessment...`);
+      // This session has a branch from a previous run but wasn't marked done
+      log(`Stale branch detected for S${session.id}, invoking triage for recovery assessment...`);
       try {
         const context = await gatherDecisionContext(
-          task, filteredTasks, args.branch, args.projectPath, args.concurrency,
+          session, filteredSessions, args.branch, args.projectPath, args.concurrency,
           { stage: "startup_validation", exitCode: -1 },
         );
         const decision = await askTriage(context, args.projectPath, projectConfig);
-        writeDecisionRecord(task.id, {
+        writeDecisionRecord(session.id, {
           timestamp: new Date().toISOString(),
           attemptNumber: context.state.attemptCount + 1,
           trigger: {
@@ -420,18 +458,17 @@ async function main(): Promise<void> {
           decision,
         }, args.projectPath);
         await executeTriageAction(
-          task, decision, context, slug, args.branch, args.projectPath, filteredTasks, args.verbose,
+          session, decision, context, slug, args.branch, args.projectPath, filteredSessions, args.verbose,
         );
 
-        // Cleanup for terminal statuses only (cast needed: executeTriageAction may
-        // have changed status back to "needs_human" despite earlier narrowing)
-        const postTriageStatus = task.status as string;
+        // Cleanup for terminal statuses only
+        const postTriageStatus = session.status as string;
         if (postTriageStatus === "needs_human" || postTriageStatus === "merging") {
-          cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: true });
+          cleanupWorktree(slug, session.id, args.branch, args.verbose, { preserveBranch: true });
         }
       } catch (e) {
-        log(`Startup triage failed for T${task.id}: ${e instanceof Error ? e.message : String(e)}`);
-        // Don't block startup — let the task proceed normally
+        log(`Startup triage failed for S${session.id}: ${e instanceof Error ? e.message : String(e)}`);
+        // Don't block startup — let the session proceed normally
       }
     }
     updateStatuses();
@@ -457,70 +494,70 @@ async function main(): Promise<void> {
     if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   });
   const dashboardInterval = setInterval(() => {
-    renderStatus(filteredTasks, args.projectPath);
+    renderStatus(filteredSessions, args.projectPath);
   }, 1000);
-  renderStatus(filteredTasks, args.projectPath);
+  renderStatus(filteredSessions, args.projectPath);
 
   // Graceful shutdown
   process.on("SIGINT", () => {
     shuttingDown = true;
-    log("\n\x1b[33mShutting down... waiting for running tasks (10s timeout)\x1b[0m");
+    log("\n\x1b[33mShutting down... waiting for running sessions (10s timeout)\x1b[0m");
 
     // Kill running agents
-    for (const t of filteredTasks) {
-      if (t.status === "running" && t.process) {
-        t.process.kill("SIGTERM");
+    for (const s of filteredSessions) {
+      if (s.status === "running" && s.process) {
+        s.process.kill("SIGTERM");
       }
     }
 
     setTimeout(() => {
       clearInterval(dashboardInterval);
       if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
-      cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose, { preserveFailedBranches: true });
-      writeProgress(allTasks, args.projectPath);
+      cleanupAllWorktrees(filteredSessions, slug, args.branch, args.verbose, { preserveFailedBranches: true });
+      writeProgress(filteredSessions, allTasks, args.projectPath);
       process.exit(1);
     }, 10000);
   });
 
   // ─── Main Loop ──────────────────────────────────────────────────────
 
-  // Loop until all tasks are done/failed or stuck
   while (!shuttingDown) {
     updateStatuses();
 
-    const runningTasks = filteredTasks.filter(t => t.status === "running");
-    const queuedTasks = filteredTasks.filter(t => t.status === "queued");
-    const blockedTasks = filteredTasks.filter(t => t.status === "blocked");
+    const runningSessions = filteredSessions.filter(s => s.status === "running");
+    const queuedSessions = filteredSessions.filter(s => s.status === "queued");
+    const blockedSessions = filteredSessions.filter(s => s.status === "blocked");
 
-    // Handle tasks in "merging" state (set by retry_merge_only or mark_done)
-    const mergingTasks = filteredTasks.filter(
-      t => t.status === "merging" && !activePromises.has(t.id),
+    // Handle sessions in "merging" state (set by retry_merge_only or mark_done)
+    const mergingSessions = filteredSessions.filter(
+      s => s.status === "merging" && !activePromises.has(s.id),
     );
-    for (const task of mergingTasks) {
-      const mergePromise = handleMergingTask(ctx, task);
-      activePromises.set(task.id, mergePromise);
+    for (const session of mergingSessions) {
+      const mergePromise = handleMergingSession(ctx, session);
+      activePromises.set(session.id, mergePromise);
     }
 
     // Check completion — nothing running, queued, or in-flight
-    if (runningTasks.length === 0 && queuedTasks.length === 0) {
+    if (runningSessions.length === 0 && queuedSessions.length === 0) {
       // Wait for in-flight merge/triage promises before exiting
       if (activePromises.size > 0) {
         await Promise.race(activePromises.values());
         continue; // Re-check statuses after promise completes
       }
 
-      if (blockedTasks.length > 0) {
-        log("\x1b[31mStuck: blocked tasks remain but nothing is running or queued.\x1b[0m");
-        const taskById = new Map(filteredTasks.map(t => [t.id, t]));
-        for (const t of blockedTasks) {
-          const failedDeps = t.dependsOn.filter(d => {
-            const dep = taskById.get(d);
+      if (blockedSessions.length > 0) {
+        log("\x1b[31mStuck: blocked sessions remain but nothing is running or queued.\x1b[0m");
+        const sessionById = new Map(filteredSessions.map(s => [s.id, s]));
+        for (const s of blockedSessions) {
+          const deps = sessionDeps.get(s.id) ?? [];
+          const failedDeps = deps.filter(depId => {
+            const dep = sessionById.get(depId);
             return dep && (dep.status === "failed" || dep.status === "needs_human");
           });
           if (failedDeps.length > 0) {
-            log(`  T${t.id} blocked by: ${failedDeps.map(d => {
-              const dep = taskById.get(d);
-              return `T${d} (${dep?.status})`;
+            log(`  S${s.id} blocked by: ${failedDeps.map(depId => {
+              const dep = sessionById.get(depId);
+              return `S${depId} (${dep?.status})`;
             }).join(", ")}`);
           }
         }
@@ -528,22 +565,24 @@ async function main(): Promise<void> {
       break;
     }
 
-    // Spawn queued tasks up to concurrency limit
-    if (activePromises.size < args.concurrency && queuedTasks.length > 0) {
-      const spawnedThisIteration: Task[] = [];
-      for (const task of queuedTasks) {
+    // Spawn queued sessions up to concurrency limit
+    if (activePromises.size < args.concurrency && queuedSessions.length > 0) {
+      const spawnedThisIteration: Session[] = [];
+      for (const session of queuedSessions) {
         if (activePromises.size >= args.concurrency) break;
 
-        // Check file conflicts with running tasks and those spawned earlier this iteration
-        const hasConflict = [...runningTasks, ...spawnedThisIteration].some(rt => hasFileConflict(task, rt));
+        // Check file conflicts with running sessions and those spawned earlier this iteration
+        const hasConflict = [...runningSessions, ...spawnedThisIteration].some(
+          rs => hasSessionFileConflict(session, rs),
+        );
         if (hasConflict) continue;
 
-        runTask(ctx, task);
-        spawnedThisIteration.push(task);
+        spawnSession(ctx, session);
+        spawnedThisIteration.push(session);
       }
     }
 
-    writeProgress(allTasks, args.projectPath);
+    writeProgress(filteredSessions, allTasks, args.projectPath);
 
     // Wait a bit before next iteration
     await new Promise(r => setTimeout(r, 2000));
@@ -556,35 +595,36 @@ async function main(): Promise<void> {
     await Promise.allSettled(activePromises.values());
   }
 
-  // Stop task dashboard
+  // Stop session dashboard
   clearInterval(dashboardInterval);
 
-  const done = filteredTasks.filter(t => t.status === "done").length;
-  const failed = filteredTasks.filter(t => t.status === "failed").length;
-  const needsHumanCount = filteredTasks.filter(t => t.status === "needs_human").length;
+  const doneSessions = filteredSessions.filter(s => s.status === "done").length;
+  const failedSessions = filteredSessions.filter(s => s.status === "failed").length;
+  const needsHumanCount = filteredSessions.filter(s => s.status === "needs_human").length;
+  const totalTasks = filteredSessions.reduce((sum, s) => sum + s.tasks.length, 0);
 
   if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   console.log("");
   console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
 
-  if (failed > 0 || needsHumanCount > 0) {
-    let summary = `  \x1b[32m${done} done\x1b[0m`;
-    if (failed > 0) summary += `, \x1b[31m${failed} failed\x1b[0m`;
+  if (failedSessions > 0 || needsHumanCount > 0) {
+    let summary = `  \x1b[32m${doneSessions} done\x1b[0m`;
+    if (failedSessions > 0) summary += `, \x1b[31m${failedSessions} failed\x1b[0m`;
     if (needsHumanCount > 0) summary += `, \x1b[33m${needsHumanCount} needs human\x1b[0m`;
-    summary += ` of ${filteredTasks.length} tasks`;
+    summary += ` of ${filteredSessions.length} sessions (${totalTasks} tasks)`;
     console.log(summary);
 
-    if (failed > 0) {
+    if (failedSessions > 0) {
       console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
     }
     if (needsHumanCount > 0) {
-      console.log(`  ${needsHumanCount} task(s) need human intervention — see artifacts/t<N>-escalation.md`);
+      console.log(`  ${needsHumanCount} session(s) need human intervention — see artifacts/s<ID>-escalation.md`);
     }
     printQAReports();
     process.exit(1);
   }
 
-  console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
+  console.log(`  \x1b[32mAll ${doneSessions} sessions merged (${totalTasks} tasks)\x1b[0m`);
   console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
   printQAReports();
 

@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Task, TaskStatus, TriageDecision, DecisionContext, FailureStage, ErrorClass } from "../src/types.js";
+import type {
+  Session,
+  SessionStatus,
+  Task,
+  TaskStatus,
+  TriageDecision,
+  DecisionContext,
+  FailureStage,
+  ErrorClass,
+} from "../src/types.js";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -59,9 +68,9 @@ vi.mock("../src/triage.js", () => ({
 }));
 
 vi.mock("../src/brief.js", () => ({
-  buildBrief: vi.fn(() => "brief"),
-  buildArchitectBrief: vi.fn(() => "architect-brief"),
-  buildImplementationBrief: vi.fn(() => "impl-brief"),
+  buildSessionBrief: vi.fn(() => "session-brief"),
+  buildSessionArchitectBrief: vi.fn(() => "architect-brief"),
+  buildSessionImplementationBrief: vi.fn(() => "impl-brief"),
 }));
 
 vi.mock("../src/git.js", () => ({
@@ -76,8 +85,8 @@ import {
   classifyMergeError,
   cleanupAfterTriage,
   handleStallCallback,
-  invokeTriageForTask,
-  type TaskRunnerContext,
+  invokeTriageForSession,
+  type SessionRunnerContext,
 } from "../src/task-runner.js";
 import { writeProgress } from "../src/progress.js";
 import { cleanupWorktree } from "../src/worktree.js";
@@ -111,7 +120,22 @@ function makeTask(overrides: Partial<Task> & { id: number; title: string }): Tas
   };
 }
 
-function makeCtx(overrides?: Partial<TaskRunnerContext>): TaskRunnerContext {
+function makeSession(overrides: Partial<Session> & { id: string }): Session {
+  return {
+    tasks: [makeTask({ id: 1, title: "Task 1" })],
+    complexity: 5,
+    focus: "Test session",
+    status: "running" as SessionStatus,
+    bytesReceived: 0,
+    turnCount: 0,
+    lastLine: "",
+    stage: "",
+    attemptCount: 0,
+    ...overrides,
+  };
+}
+
+function makeCtx(overrides?: Partial<SessionRunnerContext>): SessionRunnerContext {
   return {
     args: {
       projectPath: "/test/project",
@@ -128,11 +152,12 @@ function makeCtx(overrides?: Partial<TaskRunnerContext>): TaskRunnerContext {
       noTui: false,
     },
     slug: "test-proj",
-    filteredTasks: [],
+    filteredSessions: [],
+    allSessions: [],
     allTasks: [],
     designDoc: "",
     manifestContent: "",
-    provider: { name: "claude" } as TaskRunnerContext["provider"],
+    provider: { name: "claude" } as SessionRunnerContext["provider"],
     projectConfig: {
       agents: {
         architect: { provider: "claude", model: "opus", subagents: {} },
@@ -144,6 +169,7 @@ function makeCtx(overrides?: Partial<TaskRunnerContext>): TaskRunnerContext {
     activePromises: new Map(),
     qaReports: new Map(),
     updateStatuses: vi.fn(),
+    sessionDeps: new Map(),
     ...overrides,
   };
 }
@@ -152,6 +178,7 @@ function makeDecisionContext(): DecisionContext {
   return {
     trigger: { stage: "implementation", exitCode: 1, errorTail: "some error" },
     task: { id: 1, title: "Test", type: "", tddPhase: "GREEN", complexity: 5, requirements: [], files: [], blockedDownstream: 0 },
+    session: { id: "s1", totalTasks: 1, completedTasks: 0, remainingTasks: [], complexity: 5 },
     state: { branchExists: true, commitsAhead: 3, diffStat: "", worktreeExists: true, worktreeClean: false, planExists: true, attemptCount: 0, runningTasks: 1, freeSlots: 1 },
     history: [],
     actions: [],
@@ -168,12 +195,12 @@ beforeEach(() => {
 
 describe("classifyMergeError", () => {
   it("classifies rebase conflicts as merge_conflict/git_conflict", () => {
-    const result = classifyMergeError(new Error("Rebase conflicts for task 1"));
+    const result = classifyMergeError(new Error("Rebase conflicts for session 1"));
     expect(result).toEqual({ stage: "merge_conflict", errorClass: "git_conflict" });
   });
 
   it("classifies test suite failures as test_validation/test_failure", () => {
-    const result = classifyMergeError(new Error("Test suite failed for task 2"));
+    const result = classifyMergeError(new Error("Test suite failed for session 2"));
     expect(result).toEqual({ stage: "test_validation", errorClass: "test_failure" });
   });
 
@@ -211,53 +238,53 @@ describe("classifyMergeError", () => {
 // ─── cleanupAfterTriage ──────────────────────────────────────────────────────
 
 describe("cleanupAfterTriage", () => {
-  it("does not clean up when task is re-queued", () => {
+  it("does not clean up when session is re-queued", () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test", status: "queued" });
-    cleanupAfterTriage(ctx, task);
+    const session = makeSession({ id: "s1", status: "queued" });
+    cleanupAfterTriage(ctx, session);
     expect(mockCleanupWorktree).not.toHaveBeenCalled();
   });
 
-  it("cleans worktree and preserves branch for merging tasks", () => {
+  it("cleans worktree and preserves branch for merging sessions", () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test", status: "merging" });
-    cleanupAfterTriage(ctx, task);
+    const session = makeSession({ id: "s1", status: "merging" });
+    cleanupAfterTriage(ctx, session);
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
-      "test-proj", 1, "feat/x", false, { preserveBranch: true },
+      "test-proj", "s1", "feat/x", false, { preserveBranch: true },
     );
   });
 
-  it("cleans worktree and preserves branch for needs_human tasks", () => {
+  it("cleans worktree and preserves branch for needs_human sessions", () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 2, title: "Test", status: "needs_human" });
-    cleanupAfterTriage(ctx, task);
+    const session = makeSession({ id: "s2", status: "needs_human" });
+    cleanupAfterTriage(ctx, session);
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
-      "test-proj", 2, "feat/x", false, { preserveBranch: true },
+      "test-proj", "s2", "feat/x", false, { preserveBranch: true },
     );
   });
 
-  it("cleans worktree and deletes branch for done tasks", () => {
+  it("cleans worktree and deletes branch for done sessions", () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 3, title: "Test", status: "done" });
-    cleanupAfterTriage(ctx, task);
+    const session = makeSession({ id: "s3", status: "done" });
+    cleanupAfterTriage(ctx, session);
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
-      "test-proj", 3, "feat/x", false, { preserveBranch: false },
+      "test-proj", "s3", "feat/x", false, { preserveBranch: false },
     );
   });
 
-  it("cleans worktree and preserves branch for failed tasks", () => {
+  it("cleans worktree and preserves branch for failed sessions", () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 4, title: "Test", status: "failed" });
-    cleanupAfterTriage(ctx, task);
+    const session = makeSession({ id: "s4", status: "failed" });
+    cleanupAfterTriage(ctx, session);
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
-      "test-proj", 4, "feat/x", false, { preserveBranch: true },
+      "test-proj", "s4", "feat/x", false, { preserveBranch: true },
     );
   });
 
-  it("does not clean up when task is still running (extend_timeout)", () => {
+  it("does not clean up when session is still running (extend_timeout)", () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 5, title: "Test", status: "running" });
-    cleanupAfterTriage(ctx, task);
+    const session = makeSession({ id: "s5", status: "running" });
+    cleanupAfterTriage(ctx, session);
     expect(mockCleanupWorktree).not.toHaveBeenCalled();
   });
 });
@@ -267,7 +294,7 @@ describe("cleanupAfterTriage", () => {
 describe("handleStallCallback", () => {
   it("returns 'keep' when triage decides extend_timeout", async () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test" });
+    const session = makeSession({ id: "s1" });
 
     const decision: TriageDecision = {
       action: "extend_timeout",
@@ -279,27 +306,27 @@ describe("handleStallCallback", () => {
     mockGatherDecisionContext.mockResolvedValue(context);
     mockAskTriage.mockResolvedValue(decision);
 
-    const result = await handleStallCallback(ctx, task);
+    const result = await handleStallCallback(ctx, session);
     expect(result).toBe("keep");
     expect(mockExecuteTriageAction).toHaveBeenCalledWith(
-      task, decision, context, "test-proj", "feat/x", "/test/project", [], false,
+      session, decision, context, "test-proj", "feat/x", "/test/project", [], false,
     );
   });
 
   it("returns 'kill' for non-extend_timeout actions", async () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test" });
+    const session = makeSession({ id: "s1" });
 
     const decision: TriageDecision = {
       action: "retry_from_scratch",
-      reasoning: "Task appears stuck",
+      reasoning: "Session appears stuck",
     };
     const context = makeDecisionContext();
 
     mockGatherDecisionContext.mockResolvedValue(context);
     mockAskTriage.mockResolvedValue(decision);
 
-    const result = await handleStallCallback(ctx, task);
+    const result = await handleStallCallback(ctx, session);
     expect(result).toBe("kill");
     // Should NOT execute the action — stores it for handleFinalClose
     expect(mockExecuteTriageAction).not.toHaveBeenCalled();
@@ -307,17 +334,17 @@ describe("handleStallCallback", () => {
 
   it("returns 'kill' when triage itself fails", async () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test" });
+    const session = makeSession({ id: "s1" });
 
     mockGatherDecisionContext.mockRejectedValue(new Error("triage failed"));
 
-    const result = await handleStallCallback(ctx, task);
+    const result = await handleStallCallback(ctx, session);
     expect(result).toBe("kill");
   });
 
   it("writes decision record for all triage decisions", async () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test", lastLine: "working on it" });
+    const session = makeSession({ id: "s1", lastLine: "working on it" });
 
     const decision: TriageDecision = { action: "escalate", reasoning: "giving up" };
     const context = makeDecisionContext();
@@ -325,10 +352,10 @@ describe("handleStallCallback", () => {
     mockGatherDecisionContext.mockResolvedValue(context);
     mockAskTriage.mockResolvedValue(decision);
 
-    await handleStallCallback(ctx, task);
+    await handleStallCallback(ctx, session);
 
     expect(mockWriteDecisionRecord).toHaveBeenCalledWith(
-      1,
+      "s1",
       expect.objectContaining({
         trigger: expect.objectContaining({
           stage: "stall",
@@ -340,14 +367,35 @@ describe("handleStallCallback", () => {
       "/test/project",
     );
   });
+
+  it("uses 'Stall detected' as default summary when lastLine is empty", async () => {
+    const ctx = makeCtx();
+    const session = makeSession({ id: "s1", lastLine: "" });
+
+    const decision: TriageDecision = { action: "escalate", reasoning: "giving up" };
+    const context = makeDecisionContext();
+
+    mockGatherDecisionContext.mockResolvedValue(context);
+    mockAskTriage.mockResolvedValue(decision);
+
+    await handleStallCallback(ctx, session);
+
+    expect(mockWriteDecisionRecord).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({
+        trigger: expect.objectContaining({ errorSummary: "Stall detected" }),
+      }),
+      "/test/project",
+    );
+  });
 });
 
-// ─── invokeTriageForTask ─────────────────────────────────────────────────────
+// ─── invokeTriageForSession ───────────────────────────────────────────────────
 
-describe("invokeTriageForTask", () => {
+describe("invokeTriageForSession", () => {
   it("calls gatherDecisionContext → askTriage → writeDecisionRecord → executeTriageAction in sequence", async () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test" });
+    const session = makeSession({ id: "s1" });
 
     const context = makeDecisionContext();
     const decision: TriageDecision = { action: "retry_from_scratch", reasoning: "let's try again" };
@@ -355,16 +403,16 @@ describe("invokeTriageForTask", () => {
     mockGatherDecisionContext.mockResolvedValue(context);
     mockAskTriage.mockResolvedValue(decision);
 
-    await invokeTriageForTask(ctx, task, "implementation", 1);
+    await invokeTriageForSession(ctx, session, "implementation", 1);
 
     // Verify correct sequence
     expect(mockGatherDecisionContext).toHaveBeenCalledWith(
-      task, [], "feat/x", "/test/project", 2,
+      session, [], "feat/x", "/test/project", 2,
       { stage: "implementation", exitCode: 1, errorClass: undefined },
     );
     expect(mockAskTriage).toHaveBeenCalledWith(context, "/test/project", ctx.projectConfig);
     expect(mockWriteDecisionRecord).toHaveBeenCalledWith(
-      1,
+      "s1",
       expect.objectContaining({
         attemptNumber: 1,
         trigger: expect.objectContaining({ stage: "implementation" }),
@@ -373,38 +421,69 @@ describe("invokeTriageForTask", () => {
       "/test/project",
     );
     expect(mockExecuteTriageAction).toHaveBeenCalledWith(
-      task, decision, context, "test-proj", "feat/x", "/test/project", [], false,
+      session, decision, context, "test-proj", "feat/x", "/test/project", [], false,
     );
   });
 
   it("passes errorClass to gatherDecisionContext when provided", async () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 2, title: "Test" });
+    const session = makeSession({ id: "s2" });
 
     const context = makeDecisionContext();
     mockGatherDecisionContext.mockResolvedValue(context);
     mockAskTriage.mockResolvedValue({ action: "escalate", reasoning: "done" });
 
-    await invokeTriageForTask(ctx, task, "merge_conflict", 1, "git_conflict");
+    await invokeTriageForSession(ctx, session, "merge_conflict", 1, "git_conflict");
 
     expect(mockGatherDecisionContext).toHaveBeenCalledWith(
-      task, [], "feat/x", "/test/project", 2,
+      session, [], "feat/x", "/test/project", 2,
       { stage: "merge_conflict", exitCode: 1, errorClass: "git_conflict" },
     );
   });
 
   it("truncates error summary to 100 chars", async () => {
     const ctx = makeCtx();
-    const task = makeTask({ id: 1, title: "Test" });
+    const session = makeSession({ id: "s1" });
 
     const longError = "A".repeat(200);
     const context = { ...makeDecisionContext(), trigger: { ...makeDecisionContext().trigger, errorTail: longError } };
     mockGatherDecisionContext.mockResolvedValue(context);
     mockAskTriage.mockResolvedValue({ action: "escalate", reasoning: "done" });
 
-    await invokeTriageForTask(ctx, task, "implementation", 1);
+    await invokeTriageForSession(ctx, session, "implementation", 1);
 
     const recordArg = mockWriteDecisionRecord.mock.calls[0][1];
     expect(recordArg.trigger.errorSummary.length).toBe(100);
+  });
+
+  it("uses filteredSessions from ctx when calling gatherDecisionContext", async () => {
+    const session1 = makeSession({ id: "s1" });
+    const session2 = makeSession({ id: "s2" });
+    const ctx = makeCtx({ filteredSessions: [session1, session2] });
+
+    const context = makeDecisionContext();
+    mockGatherDecisionContext.mockResolvedValue(context);
+    mockAskTriage.mockResolvedValue({ action: "escalate", reasoning: "done" });
+
+    await invokeTriageForSession(ctx, session1, "implementation", 1);
+
+    expect(mockGatherDecisionContext).toHaveBeenCalledWith(
+      session1, [session1, session2], "feat/x", "/test/project", 2,
+      expect.any(Object),
+    );
+  });
+
+  it("writes correct attemptNumber based on context.state.attemptCount", async () => {
+    const ctx = makeCtx();
+    const session = makeSession({ id: "s1" });
+
+    const context = { ...makeDecisionContext(), state: { ...makeDecisionContext().state, attemptCount: 2 } };
+    mockGatherDecisionContext.mockResolvedValue(context);
+    mockAskTriage.mockResolvedValue({ action: "escalate", reasoning: "done" });
+
+    await invokeTriageForSession(ctx, session, "implementation", 1);
+
+    const recordArg = mockWriteDecisionRecord.mock.calls[0][1];
+    expect(recordArg.attemptNumber).toBe(3);
   });
 });

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type {
+  Session,
   Task,
   CLIArgs,
   FailureStage,
@@ -24,24 +25,30 @@ import {
   executeTriageAction,
   writeDecisionRecord,
 } from "./triage.js";
-import { buildBrief, buildArchitectBrief, buildImplementationBrief } from "./brief.js";
+import {
+  buildSessionBrief,
+  buildSessionArchitectBrief,
+  buildSessionImplementationBrief,
+} from "./brief.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
 
-// ─── Task Runner Context ─────────────────────────────────────────────────────
+// ─── Session Runner Context ───────────────────────────────────────────────────
 
-export interface TaskRunnerContext {
+export interface SessionRunnerContext {
   args: CLIArgs;
   slug: string;
-  filteredTasks: Task[];
+  filteredSessions: Session[];
+  allSessions: Session[];
   allTasks: Task[];
   designDoc: string;
   manifestContent: string;
   provider: Provider;
   projectConfig: ProjectConfig;
-  activePromises: Map<number, Promise<void>>;
-  qaReports: Map<number, string>;
+  activePromises: Map<string, Promise<void>>;
+  qaReports: Map<string, string>;
   updateStatuses: () => void;
+  sessionDeps: Map<string, string[]>;
 }
 
 // ─── Module-Level State ──────────────────────────────────────────────────────
@@ -51,7 +58,7 @@ export interface TaskRunnerContext {
  * kills a process, it stores the decision here. handleFinalClose checks
  * this map to execute the decision without re-triaging.
  */
-const pendingStallDecisions = new Map<number, {
+const pendingStallDecisions = new Map<string, {
   decision: TriageDecision;
   context: DecisionContext;
 }>();
@@ -68,21 +75,21 @@ export function classifyMergeError(error: unknown): { stage: FailureStage; error
   return { stage: "merge_conflict", errorClass: "unknown" };
 }
 
-// ─── invokeTriageForTask ─────────────────────────────────────────────────────
+// ─── invokeTriageForSession ───────────────────────────────────────────────────
 
-export async function invokeTriageForTask(
-  ctx: TaskRunnerContext,
-  task: Task,
+export async function invokeTriageForSession(
+  ctx: SessionRunnerContext,
+  session: Session,
   stage: FailureStage,
   exitCode: number,
   errorClass?: ErrorClass,
 ): Promise<void> {
   const context = await gatherDecisionContext(
-    task, ctx.filteredTasks, ctx.args.branch, ctx.args.projectPath, ctx.args.concurrency,
+    session, ctx.filteredSessions, ctx.args.branch, ctx.args.projectPath, ctx.args.concurrency,
     { stage, exitCode, errorClass },
   );
   const decision = await askTriage(context, ctx.args.projectPath, ctx.projectConfig);
-  writeDecisionRecord(task.id, {
+  writeDecisionRecord(session.id, {
     timestamp: new Date().toISOString(),
     attemptNumber: context.state.attemptCount + 1,
     trigger: {
@@ -93,33 +100,33 @@ export async function invokeTriageForTask(
     decision,
   }, ctx.args.projectPath);
   await executeTriageAction(
-    task, decision, context, ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredTasks, ctx.args.verbose,
+    session, decision, context, ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredSessions, ctx.args.verbose,
   );
 }
 
 // ─── cleanupAfterTriage ──────────────────────────────────────────────────────
 
-export function cleanupAfterTriage(ctx: TaskRunnerContext, task: Task): void {
-  switch (task.status) {
+export function cleanupAfterTriage(ctx: SessionRunnerContext, session: Session): void {
+  switch (session.status) {
     case "queued":
       // Re-queued by triage (retry_from_scratch cleaned worktree+branch;
       // resume_from_branch/reuse_plan keep worktree). Don't clean up.
       break;
     case "merging":
       // retry_merge_only or mark_done — clean worktree, keep branch for merge
-      cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: true });
+      cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: true });
       break;
     case "needs_human":
       // escalate — clean worktree, keep branch for recovery
-      cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: true });
+      cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: true });
       break;
     case "done":
       // skip_and_continue — clean worktree and branch
-      cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: false });
+      cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: false });
       break;
     case "failed":
-      // invokeTriageForTask threw — fall back to standard failure cleanup
-      cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: true });
+      // invokeTriageForSession threw — fall back to standard failure cleanup
+      cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: true });
       break;
     // "running" (extend_timeout) — no cleanup, process still alive
   }
@@ -127,33 +134,33 @@ export function cleanupAfterTriage(ctx: TaskRunnerContext, task: Task): void {
 
 // ─── handleStallCallback ─────────────────────────────────────────────────────
 
-export async function handleStallCallback(ctx: TaskRunnerContext, task: Task): Promise<"keep" | "kill"> {
+export async function handleStallCallback(ctx: SessionRunnerContext, session: Session): Promise<"keep" | "kill"> {
   try {
     const context = await gatherDecisionContext(
-      task, ctx.filteredTasks, ctx.args.branch, ctx.args.projectPath, ctx.args.concurrency,
+      session, ctx.filteredSessions, ctx.args.branch, ctx.args.projectPath, ctx.args.concurrency,
       { stage: "stall", exitCode: -1, errorClass: "stall" },
     );
     const decision = await askTriage(context, ctx.args.projectPath, ctx.projectConfig);
-    writeDecisionRecord(task.id, {
+    writeDecisionRecord(session.id, {
       timestamp: new Date().toISOString(),
       attemptNumber: context.state.attemptCount + 1,
       trigger: {
         stage: "stall",
         errorClass: "stall",
-        errorSummary: task.lastLine || "Stall detected",
+        errorSummary: session.lastLine || "Stall detected",
       },
       decision,
     }, ctx.args.projectPath);
 
     if (decision.action === "extend_timeout") {
       await executeTriageAction(
-        task, decision, context, ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredTasks, ctx.args.verbose,
+        session, decision, context, ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredSessions, ctx.args.verbose,
       );
       return "keep";
     }
 
     // For all other actions, store decision for handleFinalClose
-    pendingStallDecisions.set(task.id, { decision, context });
+    pendingStallDecisions.set(session.id, { decision, context });
     return "kill";
   } catch {
     // Triage failed — fall back to kill, let handleFinalClose handle normally
@@ -161,38 +168,38 @@ export async function handleStallCallback(ctx: TaskRunnerContext, task: Task): P
   }
 }
 
-// ─── trySpawnPhase ───────────────────────────────────────────────────────────
+// ─── trySpawnSessionPhase ─────────────────────────────────────────────────────
 
 type AgentRole = "architect" | "implementation" | "qa";
 
 /**
  * Spawns an agent for the given role. Returns the ChildProcess on success,
- * or null if spawning failed (task is marked failed and cleaned up).
+ * or null if spawning failed (session is marked failed and cleaned up).
  */
-function trySpawnPhase(
-  ctx: TaskRunnerContext,
-  task: Task,
+function trySpawnSessionPhase(
+  ctx: SessionRunnerContext,
+  session: Session,
   wp: string,
   role: AgentRole,
   buildBriefFn: () => string,
-  onStall: (t: Task) => Promise<"keep" | "kill">,
+  onStall: (s: Session) => Promise<"keep" | "kill">,
 ): ChildProcess | null {
-  task.provider = ctx.args.models[role].provider;
+  session.provider = ctx.args.models[role].provider;
   try {
     const brief = buildBriefFn();
     const env = getProviderEnv(ctx.args.models[role].provider, ctx.args.ollama);
     const child = spawnAgent(
-      task, brief, ctx.provider, ctx.args.models[role].model,
+      session, brief, ctx.provider, ctx.args.models[role].model,
       wp, ctx.args.projectPath, ctx.args.verbose, env, onStall,
     );
-    task.process = child;
+    session.process = child;
     return child;
   } catch (e: unknown) {
-    task.status = "failed";
-    task.stage = "";
-    task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
-    cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose);
-    writeProgress(ctx.allTasks, ctx.args.projectPath);
+    session.status = "failed";
+    session.stage = "";
+    session.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+    cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose);
+    writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
     ctx.updateStatuses();
     return null;
   }
@@ -202,29 +209,29 @@ function trySpawnPhase(
 
 /** Shared close handler for the final phase (implementation or QA). */
 async function handleFinalClose(
-  ctx: TaskRunnerContext,
-  task: Task,
+  ctx: SessionRunnerContext,
+  session: Session,
   code: number | null,
   resolve: () => void,
 ): Promise<void> {
   // ── Check for pre-decided stall triage ──
-  const stallResult = pendingStallDecisions.get(task.id);
+  const stallResult = pendingStallDecisions.get(session.id);
   if (stallResult) {
-    pendingStallDecisions.delete(task.id);
+    pendingStallDecisions.delete(session.id);
     await executeTriageAction(
-      task, stallResult.decision, stallResult.context,
-      ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredTasks, ctx.args.verbose,
+      session, stallResult.decision, stallResult.context,
+      ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredSessions, ctx.args.verbose,
     );
-    if (task.type === "qa") {
-      const qaReportPath = path.join(artifactsDir(ctx.args.projectPath), `t${task.id}-qa-report.md`);
+    if (session.tasks.every(t => t.type === "qa")) {
+      const qaReportPath = path.join(artifactsDir(ctx.args.projectPath), `s${session.id}-qa-report.md`);
       if (fs.existsSync(qaReportPath)) {
-        ctx.qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
+        ctx.qaReports.set(session.id, fs.readFileSync(qaReportPath, "utf-8"));
       }
     }
-    cleanupAfterTriage(ctx, task);
-    writeProgress(ctx.allTasks, ctx.args.projectPath);
+    cleanupAfterTriage(ctx, session);
+    writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
     ctx.updateStatuses();
-    ctx.activePromises.delete(task.id);
+    ctx.activePromises.delete(session.id);
     resolve();
     return;
   }
@@ -233,166 +240,168 @@ async function handleFinalClose(
   if (code === 0) {
     try {
       // Read memory entry from artifacts directory
-      const memEntryPath = path.join(artifactsDir(ctx.args.projectPath), `t${task.id}-memory-entry.md`);
+      const memEntryPath = path.join(artifactsDir(ctx.args.projectPath), `s${session.id}-memory-entry.md`);
       let memBody = "";
       if (fs.existsSync(memEntryPath)) {
         memBody = fs.readFileSync(memEntryPath, "utf-8");
       }
 
-      // Check if task produced any changes to merge
+      // Check if session produced any changes to merge
+      const branchName = session.branchName ?? `${ctx.args.branch}-s${session.id}`;
       let hasDiff = true;
       try {
-        git(["diff", "--quiet", ctx.args.branch, `${ctx.args.branch}-t${task.id}`], { verbose: ctx.args.verbose });
+        git(["diff", "--quiet", ctx.args.branch, branchName], { verbose: ctx.args.verbose });
         hasDiff = false; // exit 0 = no diff
       } catch {
-        // exit 1 = has diff (expected for implementation tasks)
+        // exit 1 = has diff (expected for implementation sessions)
       }
 
       if (!hasDiff) {
         // No changes to merge (QA passed clean, or edge case)
         if (memBody) {
-          await appendMemoryEntry(ctx.args.projectPath, task.id, task.title, memBody);
+          await appendMemoryEntry(ctx.args.projectPath, session.id, session.focus, memBody);
         }
-        task.status = "done";
-        task.stage = "";
-        task.completedAt = new Date().toISOString();
+        session.status = "done";
+        session.stage = "";
+        session.completedAt = new Date().toISOString();
       } else {
         // Normal merge path
-        task.stage = "Merging";
-        await squashMerge(task.id, ctx.args.branch, task.commitMessage, ctx.args.verbose);
+        session.stage = "Merging";
+        await squashMerge(session, ctx.args.branch, ctx.args.verbose);
 
         // Append memory AFTER successful merge
         if (memBody) {
-          await appendMemoryEntry(ctx.args.projectPath, task.id, task.title, memBody);
+          await appendMemoryEntry(ctx.args.projectPath, session.id, session.focus, memBody);
         }
 
-        task.status = "done";
-        task.stage = "";
-        task.completedAt = new Date().toISOString();
+        session.status = "done";
+        session.stage = "";
+        session.completedAt = new Date().toISOString();
       }
     } catch (mergeErr) {
       // Merge failed — invoke triage
       try {
         const mergeInfo = classifyMergeError(mergeErr);
-        await invokeTriageForTask(ctx, task, mergeInfo.stage, 0, mergeInfo.errorClass);
+        await invokeTriageForSession(ctx, session, mergeInfo.stage, 0, mergeInfo.errorClass);
       } catch (triageErr) {
-        // Triage itself failed — fall back to marking task failed
-        task.status = "failed";
-        task.stage = "";
-        task.lastLine = `[MERGE FAILED] ${(mergeErr instanceof Error ? mergeErr.message : String(mergeErr)).slice(0, 100)}`;
-        console.error(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+        // Triage itself failed — fall back to marking session failed
+        session.status = "failed";
+        session.stage = "";
+        session.lastLine = `[MERGE FAILED] ${(mergeErr instanceof Error ? mergeErr.message : String(mergeErr)).slice(0, 100)}`;
+        console.error(`[triage] Triage failed for S${session.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
       }
     }
   } else {
     // ── Non-zero exit — invoke triage ──
     try {
-      await invokeTriageForTask(ctx, task, "implementation", code ?? -1);
+      await invokeTriageForSession(ctx, session, "implementation", code ?? -1);
     } catch (triageErr) {
-      // Triage itself failed — fall back to marking task failed
-      task.status = "failed";
-      task.stage = "";
-      task.lastLine = task.lastLine || `[EXIT ${code}]`;
-      console.error(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+      // Triage itself failed — fall back to marking session failed
+      session.status = "failed";
+      session.stage = "";
+      session.lastLine = session.lastLine || `[EXIT ${code}]`;
+      console.error(`[triage] Triage failed for S${session.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
     }
   }
 
   // Capture QA report from artifacts directory
-  if (task.type === "qa") {
-    const qaReportPath = path.join(artifactsDir(ctx.args.projectPath), `t${task.id}-qa-report.md`);
+  if (session.tasks.every(t => t.type === "qa")) {
+    const qaReportPath = path.join(artifactsDir(ctx.args.projectPath), `s${session.id}-qa-report.md`);
     if (fs.existsSync(qaReportPath)) {
-      ctx.qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
+      ctx.qaReports.set(session.id, fs.readFileSync(qaReportPath, "utf-8"));
     }
   }
 
   // Cleanup based on resulting status
-  if (task.status === "done") {
-    cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: false });
+  if (session.status === "done") {
+    cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: false });
   } else {
-    cleanupAfterTriage(ctx, task);
+    cleanupAfterTriage(ctx, session);
   }
 
-  writeProgress(ctx.allTasks, ctx.args.projectPath);
+  writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
   ctx.updateStatuses();
-  ctx.activePromises.delete(task.id);
+  ctx.activePromises.delete(session.id);
   resolve();
 }
 
-// ─── spawnTask ───────────────────────────────────────────────────────────────
+// ─── spawnSession ─────────────────────────────────────────────────────────────
 
-export function spawnTask(ctx: TaskRunnerContext, task: Task): void {
-  task.status = "running";
-  task.startedAt = new Date().toISOString();
+export function spawnSession(ctx: SessionRunnerContext, session: Session): void {
+  session.status = "running";
+  session.startedAt = new Date().toISOString();
 
   let wp: string;
   try {
-    if (task.worktreePath && fs.existsSync(task.worktreePath)) {
+    if (session.worktreePath && fs.existsSync(session.worktreePath)) {
       // Reuse existing worktree (set by resume_from_branch or reuse_plan)
-      wp = task.worktreePath;
+      wp = session.worktreePath;
     } else {
-      wp = createWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose);
-      task.worktreePath = wp;
+      wp = createWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose);
+      session.worktreePath = wp;
+      session.branchName = `${ctx.args.branch}-s${session.id}`;
     }
   } catch (e: unknown) {
-    task.status = "failed";
-    task.stage = "";
-    task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
-    cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose);
-    writeProgress(ctx.allTasks, ctx.args.projectPath);
+    session.status = "failed";
+    session.stage = "";
+    session.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+    cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose);
+    writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
     ctx.updateStatuses();
     return;
   }
 
-  const onStall = (t: Task) => handleStallCallback(ctx, t);
+  const onStall = (s: Session) => handleStallCallback(ctx, s);
 
-  // QA tasks: single-phase spawn (no architect)
-  if (task.type === "qa") {
-    const child = trySpawnPhase(ctx, task, wp, "qa",
-      () => buildBrief(task, ctx.filteredTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+  // QA sessions: single-phase spawn (no architect)
+  if (session.tasks.every(t => t.type === "qa")) {
+    const child = trySpawnSessionPhase(ctx, session, wp, "qa",
+      () => buildSessionBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
       onStall,
     );
     if (!child) return;
 
     const promise = new Promise<void>((resolve) => {
-      child.on("close", (code) => handleFinalClose(ctx, task, code, resolve));
+      child.on("close", (code) => handleFinalClose(ctx, session, code, resolve));
     });
-    ctx.activePromises.set(task.id, promise);
+    ctx.activePromises.set(session.id, promise);
     return;
   }
 
-  // Low-complexity tasks: single-phase implementation (no architect)
-  if (task.complexity <= LOW_COMPLEXITY_THRESHOLD) {
-    const child = trySpawnPhase(ctx, task, wp, "implementation",
-      () => buildImplementationBrief(task, ctx.filteredTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+  // Low-complexity sessions: single-phase implementation (no architect)
+  if (session.complexity <= LOW_COMPLEXITY_THRESHOLD) {
+    const child = trySpawnSessionPhase(ctx, session, wp, "implementation",
+      () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
       onStall,
     );
     if (!child) return;
 
     const promise = new Promise<void>((resolve) => {
-      child.on("close", (code) => handleFinalClose(ctx, task, code, resolve));
+      child.on("close", (code) => handleFinalClose(ctx, session, code, resolve));
     });
-    ctx.activePromises.set(task.id, promise);
+    ctx.activePromises.set(session.id, promise);
     return;
   }
 
   // Skip architect phase if flagged by triage (resume_from_branch, reuse_plan)
-  if (task.skipArchitect) {
-    task.skipArchitect = false; // One-shot: clear after use
-    const child = trySpawnPhase(ctx, task, wp, "implementation",
-      () => buildImplementationBrief(task, ctx.filteredTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+  if (session.skipArchitect) {
+    session.skipArchitect = false; // One-shot: clear after use
+    const child = trySpawnSessionPhase(ctx, session, wp, "implementation",
+      () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
       onStall,
     );
     if (!child) return;
 
     const promise = new Promise<void>((resolve) => {
-      child.on("close", (code) => handleFinalClose(ctx, task, code, resolve));
+      child.on("close", (code) => handleFinalClose(ctx, session, code, resolve));
     });
-    ctx.activePromises.set(task.id, promise);
+    ctx.activePromises.set(session.id, promise);
     return;
   }
 
-  // Non-QA, higher-complexity tasks: two-phase architect → implementation
-  const architectChild = trySpawnPhase(ctx, task, wp, "architect",
-    () => buildArchitectBrief(task, ctx.filteredTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+  // Non-QA, higher-complexity sessions: two-phase architect → implementation
+  const architectChild = trySpawnSessionPhase(ctx, session, wp, "architect",
+    () => buildSessionArchitectBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
     onStall,
   );
   if (!architectChild) return;
@@ -400,17 +409,17 @@ export function spawnTask(ctx: TaskRunnerContext, task: Task): void {
   const promise = new Promise<void>((resolve) => {
     architectChild.on("close", async (architectCode) => {
       // Check for pre-decided stall triage
-      const stallResult = pendingStallDecisions.get(task.id);
+      const stallResult = pendingStallDecisions.get(session.id);
       if (stallResult) {
-        pendingStallDecisions.delete(task.id);
+        pendingStallDecisions.delete(session.id);
         await executeTriageAction(
-          task, stallResult.decision, stallResult.context,
-          ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredTasks, ctx.args.verbose,
+          session, stallResult.decision, stallResult.context,
+          ctx.slug, ctx.args.branch, ctx.args.projectPath, ctx.filteredSessions, ctx.args.verbose,
         );
-        cleanupAfterTriage(ctx, task);
-        writeProgress(ctx.allTasks, ctx.args.projectPath);
+        cleanupAfterTriage(ctx, session);
+        writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
         ctx.updateStatuses();
-        ctx.activePromises.delete(task.id);
+        ctx.activePromises.delete(session.id);
         resolve();
         return;
       }
@@ -418,110 +427,110 @@ export function spawnTask(ctx: TaskRunnerContext, task: Task): void {
       if (architectCode !== 0) {
         // Architect failed — invoke triage
         try {
-          await invokeTriageForTask(ctx, task, "architect", architectCode ?? -1);
+          await invokeTriageForSession(ctx, session, "architect", architectCode ?? -1);
         } catch (triageErr) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = `[ARCHITECT EXIT ${architectCode}]`;
-          console.error(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+          session.status = "failed";
+          session.stage = "";
+          session.lastLine = `[ARCHITECT EXIT ${architectCode}]`;
+          console.error(`[triage] Triage failed for S${session.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
         }
-        cleanupAfterTriage(ctx, task);
-        writeProgress(ctx.allTasks, ctx.args.projectPath);
+        cleanupAfterTriage(ctx, session);
+        writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
         ctx.updateStatuses();
-        ctx.activePromises.delete(task.id);
+        ctx.activePromises.delete(session.id);
         resolve();
         return;
       }
 
       // Verify plan was written
-      const planPath = path.join(artifactsDir(ctx.args.projectPath), `t${task.id}-task-plan.md`);
+      const planPath = path.join(artifactsDir(ctx.args.projectPath), `s${session.id}-session-plan.md`);
       if (!fs.existsSync(planPath)) {
         try {
-          await invokeTriageForTask(ctx, task, "plan_validation", 0, "missing_artifact");
+          await invokeTriageForSession(ctx, session, "plan_validation", 0, "missing_artifact");
         } catch (triageErr) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = "[ARCHITECT] No task plan produced";
-          console.error(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+          session.status = "failed";
+          session.stage = "";
+          session.lastLine = "[ARCHITECT] No session plan produced";
+          console.error(`[triage] Triage failed for S${session.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
         }
-        cleanupAfterTriage(ctx, task);
-        writeProgress(ctx.allTasks, ctx.args.projectPath);
+        cleanupAfterTriage(ctx, session);
+        writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
         ctx.updateStatuses();
-        ctx.activePromises.delete(task.id);
+        ctx.activePromises.delete(session.id);
         resolve();
         return;
       }
 
       // ── Architect succeeded — proceed to implementation ──
-      // Reset task state for phase 2 handoff
-      task.stage = "";
-      task.lastLine = "";
-      task.bytesReceived = 0;
-      task.turnCount = 0;
+      // Reset session state for phase 2 handoff
+      session.stage = "";
+      session.lastLine = "";
+      session.bytesReceived = 0;
+      session.turnCount = 0;
 
       // Rename architect log and brief for debugging
       const logDir = path.join(ctx.args.projectPath, "logs");
-      try { fs.renameSync(path.join(logDir, `t${task.id}.jsonl`), path.join(logDir, `t${task.id}-architect.jsonl`)); } catch {}
+      try { fs.renameSync(path.join(logDir, `s${session.id}.jsonl`), path.join(logDir, `s${session.id}-architect.jsonl`)); } catch {}
       const artPath = artifactsDir(ctx.args.projectPath);
-      try { fs.renameSync(path.join(artPath, `t${task.id}-brief.md`), path.join(artPath, `t${task.id}-architect-brief.md`)); } catch {}
+      try { fs.renameSync(path.join(artPath, `s${session.id}-brief.md`), path.join(artPath, `s${session.id}-architect-brief.md`)); } catch {}
 
       // Phase 2: Implementation
-      const implChild = trySpawnPhase(ctx, task, wp, "implementation",
-        () => buildImplementationBrief(task, ctx.filteredTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+      const implChild = trySpawnSessionPhase(ctx, session, wp, "implementation",
+        () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
         onStall,
       );
       if (!implChild) {
-        ctx.activePromises.delete(task.id);
+        ctx.activePromises.delete(session.id);
         resolve();
         return;
       }
 
-      implChild.on("close", (code) => handleFinalClose(ctx, task, code, resolve));
+      implChild.on("close", (code) => handleFinalClose(ctx, session, code, resolve));
     });
   });
 
-  ctx.activePromises.set(task.id, promise);
+  ctx.activePromises.set(session.id, promise);
 }
 
-// ─── handleMergingTask ───────────────────────────────────────────────────────
+// ─── handleMergingSession ─────────────────────────────────────────────────────
 
-/** Handles tasks in "merging" state (set by retry_merge_only or mark_done). */
-export async function handleMergingTask(ctx: TaskRunnerContext, task: Task): Promise<void> {
+/** Handles sessions in "merging" state (set by retry_merge_only or mark_done). */
+export async function handleMergingSession(ctx: SessionRunnerContext, session: Session): Promise<void> {
   try {
-    task.stage = "Merging";
+    session.stage = "Merging";
 
-    const memEntryPath = path.join(artifactsDir(ctx.args.projectPath), `t${task.id}-memory-entry.md`);
+    const memEntryPath = path.join(artifactsDir(ctx.args.projectPath), `s${session.id}-memory-entry.md`);
     let memBody = "";
     if (fs.existsSync(memEntryPath)) {
       memBody = fs.readFileSync(memEntryPath, "utf-8");
     }
 
-    await squashMerge(task.id, ctx.args.branch, task.commitMessage, ctx.args.verbose);
+    await squashMerge(session, ctx.args.branch, ctx.args.verbose);
 
     if (memBody) {
-      await appendMemoryEntry(ctx.args.projectPath, task.id, task.title, memBody);
+      await appendMemoryEntry(ctx.args.projectPath, session.id, session.focus, memBody);
     }
 
-    task.status = "done";
-    task.stage = "";
-    task.completedAt = new Date().toISOString();
-    // Clean up task branch (worktree already gone)
-    cleanupWorktree(ctx.slug, task.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: false });
+    session.status = "done";
+    session.stage = "";
+    session.completedAt = new Date().toISOString();
+    // Clean up session branch (worktree already gone)
+    cleanupWorktree(ctx.slug, session.id, ctx.args.branch, ctx.args.verbose, { preserveBranch: false });
   } catch (mergeErr) {
     // Merge failed again — invoke triage
-    task.stage = ""; // Clear stale "Merging" stage before triage changes status
+    session.stage = ""; // Clear stale "Merging" stage before triage changes status
     try {
       const mergeInfo = classifyMergeError(mergeErr);
-      await invokeTriageForTask(ctx, task, mergeInfo.stage, 1, mergeInfo.errorClass);
+      await invokeTriageForSession(ctx, session, mergeInfo.stage, 1, mergeInfo.errorClass);
     } catch (triageErr) {
-      task.status = "failed";
-      task.lastLine = `[MERGE FAILED] ${(mergeErr instanceof Error ? mergeErr.message : String(mergeErr)).slice(0, 100)}`;
-      console.error(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+      session.status = "failed";
+      session.lastLine = `[MERGE FAILED] ${(mergeErr instanceof Error ? mergeErr.message : String(mergeErr)).slice(0, 100)}`;
+      console.error(`[triage] Triage failed for S${session.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
     }
-    cleanupAfterTriage(ctx, task);
+    cleanupAfterTriage(ctx, session);
   }
 
-  writeProgress(ctx.allTasks, ctx.args.projectPath);
+  writeProgress(ctx.filteredSessions, ctx.allTasks, ctx.args.projectPath);
   ctx.updateStatuses();
-  ctx.activePromises.delete(task.id);
+  ctx.activePromises.delete(session.id);
 }
