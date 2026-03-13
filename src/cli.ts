@@ -42,6 +42,12 @@ function log(msg: string): void {
 function parseArgs(): CLIArgs {
   const args = process.argv.slice(2);
 
+  if (args[0] && args[0] !== "run" && !args[0].startsWith("--")) {
+    console.error(`\x1b[31mError:\x1b[0m Unknown subcommand: ${args[0]}`);
+    console.error(`Did you mean: liteboard run <project-path>  or  liteboard-setup`);
+    process.exit(1);
+  }
+
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
     console.log(`Usage: liteboard run <project-path-or-slug> [options]
 
