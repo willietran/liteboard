@@ -1,13 +1,13 @@
 import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import type { Task } from "./types.js";
+import type { Session } from "./types.js";
 import { git } from "./git.js";
 
 // ─── getWorktreePath ────────────────────────────────────────────────────────
 
-export function getWorktreePath(slug: string, taskId: number): string {
-  return path.join(tmpdir(), `liteboard-${slug}-t${taskId}`);
+export function getWorktreePath(slug: string, sessionId: string): string {
+  return path.join(tmpdir(), `liteboard-${slug}-s${sessionId}`);
 }
 
 // ─── setupFeatureBranch ─────────────────────────────────────────────────────
@@ -62,25 +62,25 @@ function clearStaleWorktreePath(wtPath: string, verbose: boolean): void {
 
 export function createWorktree(
   slug: string,
-  taskId: number,
+  sessionId: string,
   featureBranch: string,
   verbose: boolean,
 ): string {
-  const wtPath = getWorktreePath(slug, taskId);
-  const taskBranch = `${featureBranch}-t${taskId}`;
+  const wtPath = getWorktreePath(slug, sessionId);
+  const sessionBranch = `${featureBranch}-s${sessionId}`;
 
   clearStaleWorktreePath(wtPath, verbose);
 
-  // Delete stale task branch if it exists
+  // Delete stale session branch if it exists
   try { git(["worktree", "prune"], { verbose }); } catch {}
   try {
-    git(["branch", "-D", taskBranch], { verbose });
+    git(["branch", "-D", sessionBranch], { verbose });
   } catch {
     // Branch didn't exist — that's fine
   }
 
-  // Create the worktree with a new task branch from the feature branch
-  git(["worktree", "add", wtPath, "-b", taskBranch, featureBranch], { verbose });
+  // Create the worktree with a new session branch from the feature branch
+  git(["worktree", "add", wtPath, "-b", sessionBranch, featureBranch], { verbose });
 
   return wtPath;
 }
@@ -89,13 +89,13 @@ export function createWorktree(
 
 export function cleanupWorktree(
   slug: string,
-  taskId: number,
+  sessionId: string,
   featureBranch: string,
   verbose: boolean,
   opts?: { preserveBranch?: boolean },
 ): void {
-  const wtPath = getWorktreePath(slug, taskId);
-  const taskBranch = `${featureBranch}-t${taskId}`;
+  const wtPath = getWorktreePath(slug, sessionId);
+  const sessionBranch = `${featureBranch}-s${sessionId}`;
 
   try {
     git(["worktree", "remove", wtPath, "--force"], { verbose });
@@ -106,7 +106,7 @@ export function cleanupWorktree(
   if (!opts?.preserveBranch) {
     try { git(["worktree", "prune"], { verbose }); } catch {}
     try {
-      git(["branch", "-D", taskBranch], { verbose });
+      git(["branch", "-D", sessionBranch], { verbose });
     } catch {
       // Always continue
     }
@@ -117,17 +117,17 @@ export function cleanupWorktree(
 
 export function recreateWorktreeFromBranch(
   slug: string,
-  taskId: number,
+  sessionId: string,
   featureBranch: string,
   verbose: boolean,
 ): string {
-  const wtPath = getWorktreePath(slug, taskId);
-  const taskBranch = `${featureBranch}-t${taskId}`;
+  const wtPath = getWorktreePath(slug, sessionId);
+  const sessionBranch = `${featureBranch}-s${sessionId}`;
 
   clearStaleWorktreePath(wtPath, verbose);
 
   // Create worktree from existing branch (no -b flag — branch already has commits)
-  git(["worktree", "add", wtPath, taskBranch], { verbose });
+  git(["worktree", "add", wtPath, sessionBranch], { verbose });
 
   return wtPath;
 }
@@ -135,23 +135,23 @@ export function recreateWorktreeFromBranch(
 // ─── cleanupAllWorktrees ────────────────────────────────────────────────────
 
 export function cleanupAllWorktrees(
-  tasks: Task[],
+  sessions: Session[],
   slug: string,
   featureBranch: string,
   verbose: boolean,
   opts?: { preserveFailedBranches?: boolean },
 ): void {
-  for (const task of tasks) {
-    // Preserve branch for tasks with salvageable work:
+  for (const session of sessions) {
+    // Preserve branch for sessions with salvageable work:
     // - failed with merge failure (classic case)
     // - needs_human (triage-escalated, human may want to recover the branch)
     // - merging (in-flight merge attempt, branch contains committed work)
     const preserveBranch = opts?.preserveFailedBranches && (
-      (task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]")) ||
-      task.status === "needs_human" ||
-      task.status === "merging"
+      (session.status === "failed" && session.lastLine?.startsWith("[MERGE FAILED]")) ||
+      session.status === "needs_human" ||
+      session.status === "merging"
     );
-    cleanupWorktree(slug, task.id, featureBranch, verbose, { preserveBranch });
+    cleanupWorktree(slug, session.id, featureBranch, verbose, { preserveBranch });
   }
 }
 
