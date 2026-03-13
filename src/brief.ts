@@ -97,6 +97,92 @@ function appendInlineDocs(parts: string[], designDoc: string, manifest: string):
   }
 }
 
+function extractTaskEntry(lines: string[], taskId: number): string {
+  const taskHeaderRegex = /^### Task (\d+):/;
+  const phaseHeaderRegex = /^## Phase\b/;
+
+  let startIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(taskHeaderRegex);
+    if (match && parseInt(match[1]) === taskId) {
+      startIdx = i;
+      break;
+    }
+  }
+  if (startIdx === -1) return "";
+
+  let endIdx = lines.length;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (taskHeaderRegex.test(lines[i]) || phaseHeaderRegex.test(lines[i])) {
+      endIdx = i;
+      break;
+    }
+  }
+
+  return lines.slice(startIdx, endIdx).join("\n").trimEnd();
+}
+
+function findTaskPhase(lines: string[], taskId: number): string {
+  const phaseRegex = /^## (Phase \d+: .+)/;
+  const taskRegex = /^### Task (\d+):/;
+  let lastPhase = "";
+
+  for (const line of lines) {
+    const phaseMatch = line.match(phaseRegex);
+    if (phaseMatch) lastPhase = phaseMatch[1];
+    const taskMatch = line.match(taskRegex);
+    if (taskMatch && parseInt(taskMatch[1]) === taskId) return lastPhase;
+  }
+  return "";
+}
+
+export function buildManifestExcerpt(task: Task, manifest: string): string {
+  if (!manifest) return "";
+
+  const lines = manifest.split("\n");
+  const parts: string[] = [];
+
+  // 1. Extract header (everything before first "## Phase" or "### Task")
+  const headerEnd = lines.findIndex(
+    (l) => /^## Phase\b/.test(l) || /^### Task \d+:/.test(l),
+  );
+  const header = lines
+    .slice(0, headerEnd >= 0 ? headerEnd : lines.length)
+    .join("\n")
+    .trimEnd();
+  if (header) parts.push(header);
+
+  // 2. One-line summary: total task count + current task's phase
+  const taskHeaders = lines.filter((l) => /^### Task \d+:/.test(l));
+  const taskCount = taskHeaders.length;
+  if (taskCount > 0) {
+    const phase = findTaskPhase(lines, task.id);
+    const summary = phase
+      ? `**${taskCount} tasks total** — this task is in ${phase}`
+      : `**${taskCount} tasks total**`;
+    parts.push("");
+    parts.push(summary);
+  }
+
+  // 3. Extract this task's entry
+  const ownEntry = extractTaskEntry(lines, task.id);
+  if (ownEntry) {
+    parts.push("");
+    parts.push(ownEntry);
+  }
+
+  // 4. Extract direct dependency entries
+  for (const depId of task.dependsOn) {
+    const depEntry = extractTaskEntry(lines, depId);
+    if (depEntry) {
+      parts.push("");
+      parts.push(depEntry);
+    }
+  }
+
+  return parts.join("\n");
+}
+
 function appendTaskDetails(parts: string[], task: Task): void {
   parts.push("**Task details:**");
   if (task.creates.length > 0)
@@ -171,8 +257,8 @@ export function buildArchitectBrief(
   parts.push("");
 
   // 5. Design doc (inlined)
-  // 6. Manifest (inlined)
-  appendInlineDocs(parts, designDoc, manifest);
+  // 6. Manifest excerpt (inlined, scoped to task + direct deps)
+  appendInlineDocs(parts, designDoc, buildManifestExcerpt(task, manifest));
 
   // --- cache boundary ---
   // TASK-SPECIFIC:
@@ -191,6 +277,11 @@ export function buildArchitectBrief(
     for (const t of exploreTargets) parts.push(`- ${t}`);
     parts.push("");
   }
+
+  // 9.5. Tool usage constraints for architect subagents
+  parts.push("**Tool Usage Constraints:**");
+  parts.push("You may use Bash for: git log, git diff, git status, ls, file inspection. Do NOT use Bash to execute project code (node, npm, npx, python, tsc, etc.). node_modules is never installed in worktrees at planning time. Use documentation tools (context7, WebFetch, WebSearch) to verify library APIs.");
+  parts.push("");
 
   // 10. Task details
   appendTaskDetails(parts, task);
@@ -274,8 +365,8 @@ export function buildImplementationBrief(
   parts.push("");
 
   // 6. Design doc (inlined)
-  // 7. Manifest (inlined)
-  appendInlineDocs(parts, designDoc, manifest);
+  // 7. Manifest excerpt (inlined, scoped to task + direct deps)
+  appendInlineDocs(parts, designDoc, buildManifestExcerpt(task, manifest));
 
   // --- cache boundary ---
   // TASK-SPECIFIC:

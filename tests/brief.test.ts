@@ -23,6 +23,7 @@ import {
   buildArchitectBrief,
   buildImplementationBrief,
   formatSubagentHints,
+  buildManifestExcerpt,
 } from "../src/brief.js";
 import type { Task, ModelConfig, Provider } from "../src/types.js";
 import { defaultModelConfig } from "../src/types.js";
@@ -124,6 +125,75 @@ function mockOllamaProvider(): Provider {
     },
   };
 }
+
+// ─── TEST_MANIFEST fixture ───────────────────────────────────────────────────
+
+const TEST_MANIFEST = [
+  "# Test Project — Task Manifest",
+  "",
+  "## Tech Stack",
+  "",
+  "| Concern | Choice |",
+  "|---------|--------|",
+  "| Runtime | Node.js 22+ |",
+  "| Language | TypeScript |",
+  "",
+  "## Testing Strategy",
+  "",
+  "- All src/ modules have Vitest tests",
+  "- Mock external dependencies",
+  "",
+  "---",
+  "",
+  "## Phase 1: Foundation",
+  "",
+  "### Task 1: Setup scaffolding",
+  "",
+  "- **Creates:** `package.json`, `tsconfig.json`",
+  "- **Modifies:** (none)",
+  "- **Depends on:** (none)",
+  "- **Requirements:**",
+  "  - Initialize npm package",
+  "  - Configure TypeScript",
+  "- **TDD Phase:** Exempt",
+  "- **Complexity Score:** 2",
+  "",
+  "### Task 2: Core types",
+  "",
+  "- **Creates:** `src/types.ts`",
+  "- **Modifies:** (none)",
+  "- **Depends on:** Task 1",
+  "- **Requirements:**",
+  "  - Define shared interfaces",
+  "  - Export all types",
+  "- **TDD Phase:** RED → GREEN",
+  "- **Complexity Score:** 3",
+  "",
+  "---",
+  "",
+  "## Phase 2: Implementation",
+  "",
+  "### Task 3: Parser module",
+  "",
+  "- **Creates:** `src/parser.ts`",
+  "- **Modifies:** (none)",
+  "- **Depends on:** Task 2",
+  "- **Requirements:**",
+  "  - Parse manifest markdown",
+  "  - Return Task array",
+  "- **TDD Phase:** RED → GREEN",
+  "- **Complexity Score:** 4",
+  "",
+  "### Task 4: Integration",
+  "",
+  "- **Creates:** (none)",
+  "- **Modifies:** `src/cli.ts`",
+  "- **Depends on:** Task 2, Task 3",
+  "- **Requirements:**",
+  "  - Wire parser into CLI",
+  "- **TDD Phase:** Exempt",
+  "- **Complexity Score:** 3",
+].join("\n");
 
 // ─── formatSubagentHints ─────────────────────────────────────────────────────
 
@@ -534,7 +604,9 @@ describe("buildArchitectBrief", () => {
     const task = makeTask();
     const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
-    expect(brief).not.toContain("Phase");
+    expect(brief).not.toContain("Phase 1: Implement");
+    expect(brief).not.toContain("Phase 2: Verify");
+    expect(brief).not.toContain("Phase 3: Code Review");
     expect(brief).not.toContain("Commit message");
   });
 
@@ -550,6 +622,26 @@ describe("buildArchitectBrief", () => {
     const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("feat/brief");
+  });
+
+  it("includes tool usage constraints", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Tool Usage Constraints");
+    expect(brief).toContain("Do NOT use Bash to execute project code");
+    expect(brief).toContain("node_modules is never installed in worktrees");
+  });
+
+  it("tool constraints appear after explore targets and before plan output", () => {
+    const task = makeTask({ explore: ["How auth works"] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    const constraintIdx = brief.indexOf("Tool Usage Constraints");
+    const exploreIdx = brief.indexOf("How auth works");
+    const planOutputIdx = brief.indexOf("### Plan Output");
+    expect(constraintIdx).toBeGreaterThan(exploreIdx);
+    expect(constraintIdx).toBeLessThan(planOutputIdx);
   });
 });
 
@@ -869,5 +961,140 @@ describe("shell anti-patterns inclusion", () => {
     const brief = buildArchitectBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
 
     expect(brief).not.toContain("# Shell Anti-Patterns");
+  });
+});
+
+// ─── buildManifestExcerpt ────────────────────────────────────────────────────
+
+describe("buildManifestExcerpt", () => {
+  it("includes the task's own entry", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("### Task 3: Parser module");
+    expect(result).toContain("Parse manifest markdown");
+  });
+
+  it("includes direct dependency entries", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("### Task 2: Core types");
+    expect(result).toContain("Define shared interfaces");
+  });
+
+  it("includes header sections", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("## Tech Stack");
+    expect(result).toContain("Node.js 22+");
+    expect(result).toContain("## Testing Strategy");
+    expect(result).toContain("All src/ modules have Vitest tests");
+  });
+
+  it("includes one-line summary with total task count", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("4 tasks");
+  });
+
+  it("excludes unrelated tasks", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).not.toContain("### Task 1: Setup scaffolding");
+    expect(result).not.toContain("### Task 4: Integration");
+  });
+
+  it("works with tasks that have no dependencies", () => {
+    const task = makeTask({ id: 1, dependsOn: [] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("### Task 1: Setup scaffolding");
+    expect(result).not.toContain("### Task 2");
+    expect(result).not.toContain("### Task 3");
+    expect(result).not.toContain("### Task 4");
+  });
+
+  it("includes only direct dependencies, not transitive", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    // Task 2 depends on Task 1, but task 3 only directly depends on task 2
+    expect(result).toContain("### Task 2:");
+    expect(result).not.toContain("### Task 1:");
+  });
+
+  it("returns empty string for empty manifest", () => {
+    const task = makeTask();
+    const result = buildManifestExcerpt(task, "");
+
+    expect(result).toBe("");
+  });
+
+  it("handles manifest with no task entries gracefully", () => {
+    const task = makeTask();
+    const result = buildManifestExcerpt(task, "# Simple Manifest\nSome content");
+
+    expect(result).toContain("# Simple Manifest");
+    expect(result).toContain("Some content");
+  });
+
+  it("summary line omits phase when task ID is not in manifest", () => {
+    const task = makeTask({ id: 99, dependsOn: [] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("4 tasks");
+    expect(result).not.toContain("Phase 1");
+    expect(result).not.toContain("Phase 2");
+  });
+});
+
+// ─── Manifest excerpt integration ────────────────────────────────────────────
+
+describe("manifest excerpt integration", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("architect brief uses manifest excerpt, excludes unrelated tasks", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design", TEST_MANIFEST, "feat/brief");
+
+    expect(brief).toContain("### Task 3: Parser module");
+    expect(brief).toContain("### Task 2: Core types");
+    expect(brief).not.toContain("### Task 1: Setup scaffolding");
+    expect(brief).not.toContain("### Task 4: Integration");
+  });
+
+  it("implementation brief uses manifest excerpt, excludes unrelated tasks", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design", TEST_MANIFEST, "feat/brief");
+
+    expect(brief).toContain("### Task 3: Parser module");
+    expect(brief).toContain("### Task 2: Core types");
+    expect(brief).not.toContain("### Task 1: Setup scaffolding");
+    expect(brief).not.toContain("### Task 4: Integration");
+  });
+
+  it("architect brief still includes design doc verbatim", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design Doc\nFull design content here.", TEST_MANIFEST, "feat/brief");
+
+    expect(brief).toContain("## Design Document");
+    expect(brief).toContain("Full design content here.");
+  });
+
+  it("briefs handle empty manifest without error", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const architectBrief = buildArchitectBrief(task, [task], "/fake/project", "# Design", "", "feat/brief");
+    const implBrief = buildImplementationBrief(task, [task], "/fake/project", "# Design", "", "feat/brief");
+
+    expect(architectBrief).not.toContain("## Task Manifest");
+    expect(implBrief).not.toContain("## Task Manifest");
   });
 });
