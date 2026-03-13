@@ -6,3 +6,5 @@ dist/
 logs/
 .autoboard-logs/
 *.tmp
+
+.qa-report.md

@@ -65,6 +65,7 @@ function makeMockProvider(
     parseStream: vi.fn(() => parseResult),
     createStreamParser: vi.fn(() => vi.fn(() => parseResult)),
     healthCheck: vi.fn(async () => true),
+    subagentModelHint: vi.fn(() => "sonnet"),
   };
 }
 
@@ -119,7 +120,7 @@ describe("spawnAgent", () => {
 
   // ── 3. Calls provider.spawn with correct opts ──────────────────────────
 
-  it("calls provider.spawn with correct opts", () => {
+  it("calls provider.spawn with correct opts (no env)", () => {
     const task = makeTask({ id: 5 });
     const child = makeMockChild();
     const provider = makeMockProvider(child);
@@ -131,6 +132,24 @@ describe("spawnAgent", () => {
       model: "opus",
       cwd: "/tmp/wp",
       verbose: true,
+      env: undefined,
+    });
+  });
+
+  it("passes env to provider.spawn when provided", () => {
+    const task = makeTask({ id: 5 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+    const env = { ANTHROPIC_BASE_URL: "http://localhost:11434", ANTHROPIC_AUTH_TOKEN: "ollama" };
+
+    spawnAgent(task, "my brief", provider, "opus", "/tmp/wp", "/proj", true, env);
+
+    expect(provider.spawn).toHaveBeenCalledWith({
+      prompt: "my brief",
+      model: "opus",
+      cwd: "/tmp/wp",
+      verbose: true,
+      env,
     });
   });
 

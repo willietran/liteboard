@@ -38,6 +38,9 @@ This manifest describes all tasks for the feature branch.
 - Create database connection module
 - Add migration runner
 - Wire into config and entry point
+**Explore:**
+- How the config loader discovers files — for wiring database config
+- What CLI argument patterns exist — for adding new flags
 
 **TDD Phase:** RED
 **Commit:** feat: add database layer with migrations
@@ -581,6 +584,39 @@ describe("parseManifest", () => {
         expect.stringContaining("Task 1 has complexity 15"),
       );
       spy.mockRestore();
+    });
+  });
+
+  // ── 11. Explore field parsing ──────────────────────────────────────────
+
+  describe("parses Explore as bullet list", () => {
+    it("parses explore targets from manifest", () => {
+      const manifestPath = writeTmpManifest("explore.md", SAMPLE_MANIFEST);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[1].explore).toEqual([
+        "How the config loader discovers files — for wiring database config",
+        "What CLI argument patterns exist — for adding new flags",
+      ]);
+    });
+
+    it("returns empty array when Explore field is missing", () => {
+      const manifestPath = writeTmpManifest("explore-missing.md", SAMPLE_MANIFEST);
+      const tasks = parseManifest(manifestPath);
+      // Task 1 has no Explore field
+      expect(tasks[0].explore).toEqual([]);
+    });
+
+    it("returns empty array when Explore field is (none)", () => {
+      const manifest = `
+### Task 1: No explore
+
+**Explore:** (none)
+**Complexity Score:** 1
+`.trimStart();
+      const manifestPath = writeTmpManifest("explore-none.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      // parseBulletList finds no bullets after "(none)" on the header line
+      expect(tasks[0].explore).toEqual([]);
     });
   });
 });

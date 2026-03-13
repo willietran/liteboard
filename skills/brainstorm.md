@@ -20,16 +20,18 @@ Every project benefits from a design phase. Even "simple" features have edge cas
 
 ## Workflow
 
-### 1. Explore Context
-- Use the Agent tool with `subagent_type="Explore"` to investigate the codebase
-- Understand existing patterns, conventions, and architecture
-- Identify integration points for the new feature
-
-### 2. Ask Clarifying Questions
-- Ask **one question at a time**
+### 1. Understand Intent
+- If the user provided a description with the command, acknowledge it and move to clarifying questions — do NOT ask them to repeat what they already said
+- If no description was provided, ask: "What would you like to build?"
+- Then ask clarifying questions **one at a time**
 - Prefer **multiple choice** format when possible (A/B/C with trade-offs)
 - Cover: scope, constraints, user experience, edge cases, security
 - Don't ask questions you can answer by reading the codebase
+
+### 2. Explore Context
+- Only after understanding user intent, explore the **relevant** parts of the codebase
+- Use the Agent tool with `subagent_type="Explore"` to investigate integration points for the described feature
+- If this is a greenfield project with no existing code to integrate with, skip this step
 
 ### 3. Propose Approaches
 - Present **2-3 approaches** with explicit trade-offs
@@ -60,13 +62,33 @@ docs/liteboard/<slug>/
 Default `config.json`:
 ```json
 {
-  "models": {
-    "implementation": { "provider": "claude", "model": "claude-opus-4-6" },
-    "qa":             { "provider": "claude", "model": "claude-opus-4-6" },
-    "explore":        { "provider": "claude", "model": "claude-sonnet-4-6" },
-    "planReview":     { "provider": "claude", "model": "claude-opus-4-6" },
-    "codeReview":     { "provider": "claude", "model": "claude-sonnet-4-6" },
-    "qaFixer":        { "provider": "claude", "model": "claude-opus-4-6" }
+  "ollama": {
+    "baseUrl": "http://localhost:11434",
+    "fallback": true
+  },
+  "agents": {
+    "architect": {
+      "provider": "claude",
+      "model": "claude-opus-4-6",
+      "subagents": {
+        "explore": { "model": "claude-sonnet-4-6" },
+        "planReview": { "model": "claude-opus-4-6" }
+      }
+    },
+    "implementation": {
+      "provider": "claude",
+      "model": "claude-opus-4-6",
+      "subagents": {
+        "codeReview": { "model": "claude-sonnet-4-6" }
+      }
+    },
+    "qa": {
+      "provider": "claude",
+      "model": "claude-opus-4-6",
+      "subagents": {
+        "qaFixer": { "model": "claude-opus-4-6" }
+      }
+    }
   },
   "concurrency": 1
 }

@@ -17,11 +17,13 @@ Every task must satisfy these standards. Violations are blocking issues in code 
 
 ## Security
 
-- **Never trust user input.** Validate ALL external input server-side at system boundaries (forms, API bodies, query params, URL params, uploads). Use schema validation (Zod, Joi, etc.). Client-side validation is UX, not security.
+- **Never trust user input (A03 Injection/XSS).** Validate ALL external input server-side at system boundaries (forms, API bodies, query params, URL params, uploads). Use schema validation (Zod, Joi, etc.). Client-side validation is UX, not security. Sanitize all HTML output — no unsanitized dynamic rendering.
 - **Prevent injection.** Use parameterized queries / ORMs for database access. Use argument arrays for subprocess calls. Never string-interpolate untrusted data into SQL, shell commands, templates, or HTML.
-- **Enforce authorization, not just authentication.** Every endpoint and data query must verify the requesting user owns the resource. Use RLS or equivalent. Default-deny.
-- **Protect secrets.** No API keys, tokens, or passwords in client bundles, logs, error messages, or committed code. Use environment variables. Ensure `.env` is gitignored.
-- **Secure defaults.** Where applicable, set CORS, CSP, cookie flags, and rate limits explicitly. Don't expose stack traces in production. Protect abuse-prone endpoints with rate limiting.
+- **Enforce access control (A01).** Every endpoint and data query must verify the requesting user owns the resource. Use RLS or equivalent. Default-deny. No direct object references without ownership checks.
+- **Protect secrets (A02).** No API keys, tokens, or passwords in client bundles, logs, error messages, or committed code. Use environment variables. Ensure `.env` is gitignored.
+- **Secure defaults.** Where applicable, set CORS, CSP, cookie flags, and rate limits explicitly. Don't expose stack traces or debug info in production.
+- **CSRF protection.** State-changing endpoints must use framework CSRF tokens or SameSite cookies.
+- **Rate limiting.** Abuse-prone endpoints (auth, payment, upload, booking, registration) must be rate-limited.
 - **Flag security issues explicitly.** When you encounter a potential security issue — even a minor one — flag it. Do not silently work around security problems.
 
 ## Performance

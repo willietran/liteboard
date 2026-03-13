@@ -18,7 +18,12 @@ vi.mock("../src/memory.js", () => ({
 
 import { readFileSync } from "node:fs";
 import { readMemorySnapshot } from "../src/memory.js";
-import { buildBrief } from "../src/brief.js";
+import {
+  buildBrief,
+  buildArchitectBrief,
+  buildImplementationBrief,
+  formatSubagentHints,
+} from "../src/brief.js";
 import type { Task, ModelConfig, Provider } from "../src/types.js";
 import { defaultModelConfig } from "../src/types.js";
 
@@ -26,6 +31,7 @@ import { defaultModelConfig } from "../src/types.js";
 
 const STUB_COMMANDS: Record<string, string> = {
   "agent-orientation.md": "# Agent Orientation\nYou are a spawned subagent.",
+  "architect-orientation.md": "# Architect Orientation\nYou are a spawned architect agent.",
   "plan-review.md": "# Plan Review\nSpawn a review subagent.",
   "session-review.md": "# Session Review\nSpawn a review subagent for code.",
   "receiving-code-review.md": "# Receiving Code Review\nProcess feedback methodically.",
@@ -33,6 +39,7 @@ const STUB_COMMANDS: Record<string, string> = {
   "quality-standards.md": "# Quality Standards\nEvery task must satisfy these standards.",
   "verification.md": "# Verification\nRun `npx tsc --noEmit`, `npm run build`, `npm test` in a verification loop.",
   "qa-agent.md": "# QA Agent\nYou are a QA validation agent.",
+  "shell-anti-patterns.md": "# Shell Anti-Patterns\nAvoid interactive CLI tools.",
 };
 
 function stubReadFileSync() {
@@ -54,6 +61,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     modifies: [],
     dependsOn: [],
     requirements: ["Export buildBrief function", "Read commands/*.md files"],
+    explore: [],
     tddPhase: "RED → GREEN",
     commitMessage: "feat(brief): add brief assembler",
     complexity: 3,
@@ -74,6 +82,7 @@ function makeDepTask(overrides: Partial<Task> = {}): Task {
     modifies: [],
     dependsOn: [],
     requirements: [],
+    explore: [],
     tddPhase: "RED → GREEN",
     commitMessage: "feat(memory): add memory module",
     complexity: 2,
@@ -93,7 +102,8 @@ function mockProvider(): Provider {
     parseStream: vi.fn() as any,
     createStreamParser: vi.fn() as any,
     healthCheck: vi.fn() as any,
-    subagentModelHint(fullModel: string): string {
+    subagentModelHint(fullModel: string, providerName: string): string {
+      if (providerName !== "claude") return "";
       if (fullModel.includes("opus")) return "opus";
       if (fullModel.includes("haiku")) return "haiku";
       return "sonnet";
@@ -101,9 +111,67 @@ function mockProvider(): Provider {
   };
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+function mockOllamaProvider(): Provider {
+  return {
+    name: "ollama",
+    spawn: vi.fn() as any,
+    parseStream: vi.fn() as any,
+    createStreamParser: vi.fn() as any,
+    healthCheck: vi.fn() as any,
+    subagentModelHint(_fullModel: string, providerName: string): string {
+      if (providerName !== "claude") return "";
+      return "sonnet";
+    },
+  };
+}
 
-describe("buildBrief", () => {
+// ─── formatSubagentHints ─────────────────────────────────────────────────────
+
+describe("formatSubagentHints", () => {
+  it("returns model hint lines for Claude provider", () => {
+    const provider = mockProvider();
+    const entries = [{ name: "Code Review", model: "claude-sonnet-4-6" }];
+    const result = formatSubagentHints(entries, "claude", provider);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBe('- Code Review sub-agents: model: "sonnet"');
+  });
+
+  it("returns inherits-parent text for Ollama (empty hint)", () => {
+    const provider = mockProvider();
+    const entries = [{ name: "Code Review", model: "kimi-k2.5:cloud" }];
+    const result = formatSubagentHints(entries, "ollama", provider);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toContain("inherits parent model");
+    expect(result[0]).toContain("do not specify a model parameter");
+    expect(result[0]).not.toContain('model: ""');
+  });
+
+  it("handles multiple entries", () => {
+    const provider = mockProvider();
+    const entries = [
+      { name: "Explore", model: "claude-sonnet-4-6" },
+      { name: "Plan Review", model: "claude-opus-4-6" },
+    ];
+    const result = formatSubagentHints(entries, "claude", provider);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe('- Explore sub-agents: model: "sonnet"');
+    expect(result[1]).toBe('- Plan Review sub-agents: model: "opus"');
+  });
+
+  it("returns empty array for empty entries", () => {
+    const provider = mockProvider();
+    const result = formatSubagentHints([], "claude", provider);
+
+    expect(result).toEqual([]);
+  });
+});
+
+// ─── buildImplementationBrief ────────────────────────────────────────────────
+
+describe("buildImplementationBrief", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     stubReadFileSync();
@@ -112,7 +180,7 @@ describe("buildBrief", () => {
 
   it("starts with agent-orientation.md content", () => {
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     const lines = brief.split("\n");
     expect(lines[0]).toBe("# Agent Orientation");
@@ -121,18 +189,22 @@ describe("buildBrief", () => {
 
   it("includes task context with ID, title, and slug", () => {
     const task = makeTask({ id: 7, title: "Parse manifest" });
-    const brief = buildBrief(task, [task], "/home/user/my-project", "design.md", "manifest.json", "feat/parse");
+    const brief = buildImplementationBrief(task, [task], "/home/user/my-project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/parse");
 
     expect(brief).toContain("Task 7: Parse manifest");
     expect(brief).toContain("my-project");
   });
 
-  it("includes design doc and manifest paths", () => {
+  it("inlines design doc and manifest content", () => {
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "/path/to/design.md", "/path/to/manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nThe design doc.", "# Manifest\nThe manifest.", "feat/brief");
 
-    expect(brief).toContain("/path/to/design.md");
-    expect(brief).toContain("/path/to/manifest.json");
+    expect(brief).toContain("## Design Document");
+    expect(brief).toContain("# Design");
+    expect(brief).toContain("The design doc.");
+    expect(brief).toContain("## Task Manifest");
+    expect(brief).toContain("# Manifest");
+    expect(brief).toContain("The manifest.");
   });
 
   it("injects memory snapshot when entries exist", () => {
@@ -140,7 +212,7 @@ describe("buildBrief", () => {
     (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
 
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("Build Memory");
     expect(brief).toContain("## T10 - Setup");
@@ -151,29 +223,9 @@ describe("buildBrief", () => {
     (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
 
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).not.toContain("Build Memory");
-  });
-
-  it("infers explore hints from creates and modifies", () => {
-    const task = makeTask({
-      creates: ["src/brief.ts"],
-      modifies: ["src/types.ts"],
-    });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
-
-    expect(brief).toContain("Explore src/ for existing patterns");
-  });
-
-  it("infers explore hints from dependsOn tasks", () => {
-    const depTask = makeDepTask({ id: 10, title: "Setup memory module", creates: ["src/memory.ts"] });
-    const task = makeTask({ dependsOn: [10] });
-    const allTasks = [depTask, task];
-
-    const brief = buildBrief(task, allTasks, "/fake/project", "design.md", "manifest.json", "feat/brief");
-
-    expect(brief).toContain("Read src/memory.ts (created by Task 10: Setup memory module)");
   });
 
   it("includes task details: creates, modifies, requirements", () => {
@@ -182,7 +234,7 @@ describe("buildBrief", () => {
       modifies: ["src/types.ts"],
       requirements: ["Export buildBrief function", "Read commands/*.md files"],
     });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("Creates:");
     expect(brief).toContain("`src/brief.ts`");
@@ -194,7 +246,7 @@ describe("buildBrief", () => {
 
   it("includes commit message and rules at the end", () => {
     const task = makeTask({ commitMessage: "feat(brief): add brief assembler" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("feat(brief): add brief assembler");
     expect(brief).toContain("Do NOT touch files unrelated to this task");
@@ -207,35 +259,71 @@ describe("buildBrief", () => {
     expect(rulesIdx).toBeGreaterThan(workflowIdx);
   });
 
-  it("embeds all command files: plan-review, session-review, receiving-code-review, code-reviewer", () => {
+  it("includes session-review and code-reviewer but NOT plan-review", () => {
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
-    expect(brief).toContain("# Plan Review");
-    expect(brief).toContain("Spawn a review subagent.");
     expect(brief).toContain("# Session Review");
     expect(brief).toContain("Spawn a review subagent for code.");
     expect(brief).toContain("# Receiving Code Review");
-    expect(brief).toContain("Process feedback methodically.");
     expect(brief).toContain("# Code Reviewer");
-    expect(brief).toContain("Evaluate code against criteria.");
+    expect(brief).not.toContain("# Plan Review");
   });
 
-  it("deduplicates explore hints", () => {
+  it("does NOT include explore hints", () => {
     const task = makeTask({
       creates: ["src/brief.ts"],
-      modifies: ["src/other.ts"],
+      modifies: ["src/types.ts"],
     });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
-    // Both files are in src/, so hint should appear only once
-    const matches = brief.match(/Explore src\/ for existing patterns/g);
-    expect(matches).toHaveLength(1);
+    expect(brief).not.toContain("Explore src/ for existing patterns");
+    expect(brief).not.toContain("Explore targets");
+  });
+
+  it("includes instruction to read task plan from artifacts dir", () => {
+    const task = makeTask({ id: 13 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("/fake/project/artifacts/t13-task-plan.md");
+    expect(brief).toMatch(/[Rr]ead.*plan/);
+  });
+
+  it("includes plan read instruction for complexity > 2", () => {
+    const task = makeTask({ complexity: 3 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Task plan");
+    expect(brief).toContain("task-plan.md");
+  });
+
+  it("skips plan read instruction for complexity 2", () => {
+    const task = makeTask({ complexity: 2 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("Task plan");
+    expect(brief).not.toContain("task-plan.md");
+  });
+
+  it("skips plan read instruction for complexity 1", () => {
+    const task = makeTask({ complexity: 1 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("Task plan");
+    expect(brief).not.toContain("task-plan.md");
+  });
+
+  it("skips plan read instruction for complexity 0", () => {
+    const task = makeTask({ complexity: 0 });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("Task plan");
+    expect(brief).not.toContain("task-plan.md");
   });
 
   it("includes TDD phase in workflow when set", () => {
     const task = makeTask({ tddPhase: "RED → GREEN" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("RED → GREEN");
   });
@@ -251,21 +339,21 @@ describe("buildBrief", () => {
 
     const task = makeTask();
     expect(() =>
-      buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief"),
+      buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief"),
     ).toThrow(/Missing command file.*agent-orientation\.md.*Is liteboard installed correctly/);
   });
 
   it("omits TDD line when tddPhase is Exempt", () => {
     const task = makeTask({ tddPhase: "Exempt" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("TDD-Exempt");
     expect(brief).not.toContain("BLOCKING violation");
   });
 
-  it("includes quality standards in every brief", () => {
+  it("includes quality standards", () => {
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("# Quality Standards");
     expect(brief).toContain("Every task must satisfy these standards.");
@@ -273,42 +361,221 @@ describe("buildBrief", () => {
 
   it("includes expanded TDD discipline for TDD tasks", () => {
     const task = makeTask({ tddPhase: "RED → GREEN" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("Write a failing test first");
     expect(brief).toContain("BLOCKING violation");
   });
 
-  it("includes verification phase between implement and code review", () => {
+  it("includes verification phase", () => {
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("tsc --noEmit");
     expect(brief).toContain("npm run build");
     expect(brief).toContain("npm test");
-
-    // Verification phase is properly numbered and ordered
-    expect(brief).toContain("Phase 5: Verify");
-    expect(brief).toContain("Phase 6: Code Review");
-    const verifyIdx = brief.indexOf("Phase 5: Verify");
-    const codeReviewIdx = brief.indexOf("Phase 6: Code Review");
-    expect(verifyIdx).toBeLessThan(codeReviewIdx);
-
-    // Verification commands come from the verification phase, not the rules section
-    const rulesIdx = brief.indexOf("## Rules");
-    expect(brief.indexOf("tsc --noEmit")).toBeLessThan(rulesIdx);
   });
 
   it("includes artifacts path for memory entry in rules", () => {
     const task = makeTask({ id: 13 });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("/fake/project/artifacts/t13-memory-entry.md");
   });
 
   it("instructs agents to save artifacts outside repo root", () => {
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("never to the repo root");
+  });
+});
+
+// ─── buildArchitectBrief ─────────────────────────────────────────────────────
+
+describe("buildArchitectBrief", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("starts with architect-orientation.md content", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    const lines = brief.split("\n");
+    expect(lines[0]).toBe("# Architect Orientation");
+    expect(brief).toContain("You are a spawned architect agent.");
+  });
+
+  it("does NOT use agent-orientation.md", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("You are a spawned subagent.");
+  });
+
+  it("includes plan-review but NOT session-review", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("# Plan Review");
+    expect(brief).toContain("Spawn a review subagent.");
+    expect(brief).not.toContain("# Session Review");
+  });
+
+  it("includes receiving-code-review but not code-reviewer in architect brief", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("# Receiving Code Review");
+    expect(brief).not.toContain("# Code Reviewer");
+  });
+
+  it("includes explore targets (inferred from creates/modifies)", () => {
+    const task = makeTask({
+      creates: ["src/brief.ts"],
+      modifies: ["src/types.ts"],
+    });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Explore src/ for existing patterns");
+  });
+
+  it("includes explore hints from dependency tasks", () => {
+    const depTask = makeDepTask({ id: 10, title: "Setup memory module", creates: ["src/memory.ts"] });
+    const task = makeTask({ dependsOn: [10] });
+    const allTasks = [depTask, task];
+
+    const brief = buildArchitectBrief(task, allTasks, "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Read src/memory.ts (created by Task 10: Setup memory module)");
+  });
+
+  it("deduplicates explore hints", () => {
+    const task = makeTask({
+      creates: ["src/brief.ts"],
+      modifies: ["src/other.ts"],
+    });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    const matches = brief.match(/Explore src\/ for existing patterns/g);
+    expect(matches).toHaveLength(1);
+  });
+
+  it("inlines design doc and manifest content", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nThe design doc.", "# Manifest\nThe manifest.", "feat/brief");
+
+    expect(brief).toContain("## Design Document");
+    expect(brief).toContain("# Design");
+    expect(brief).toContain("The design doc.");
+    expect(brief).toContain("## Task Manifest");
+    expect(brief).toContain("# Manifest");
+    expect(brief).toContain("The manifest.");
+  });
+
+  it("includes task context with ID, title, and slug", () => {
+    const task = makeTask({ id: 7, title: "Parse manifest" });
+    const brief = buildArchitectBrief(task, [task], "/home/user/my-project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/parse");
+
+    expect(brief).toContain("Task 7: Parse manifest");
+    expect(brief).toContain("my-project");
+  });
+
+  it("includes task details: creates, modifies, requirements", () => {
+    const task = makeTask({
+      creates: ["src/brief.ts"],
+      modifies: ["src/types.ts"],
+      requirements: ["Export buildBrief function"],
+    });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("`src/brief.ts`");
+    expect(brief).toContain("`src/types.ts`");
+    expect(brief).toContain("Export buildBrief function");
+  });
+
+  it("includes quality standards", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("# Quality Standards");
+    expect(brief).toContain("Every task must satisfy these standards.");
+  });
+
+  it("instructs to write plan to artifacts dir", () => {
+    const task = makeTask({ id: 7 });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("/fake/project/artifacts/t7-task-plan.md");
+    expect(brief).toMatch(/[Ww]rite.*plan/);
+  });
+
+  it("includes memory snapshot when present", () => {
+    const memoryContent = "# Liteboard Memory Log\n\n## T10 - Setup - 2025-01-01\nDone setup.\n";
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
+
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Build Memory");
+    expect(brief).toContain("## T10 - Setup");
+  });
+
+  it("does NOT include verification phase", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("# Verification");
+    expect(brief).not.toContain("tsc --noEmit");
+  });
+
+  it("does NOT include implementation or commit phases", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("Phase");
+    expect(brief).not.toContain("Commit message");
+  });
+
+  it("includes memory entry path in rules", () => {
+    const task = makeTask({ id: 7 });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("/fake/project/artifacts/t7-memory-entry.md");
+  });
+
+  it("includes feature branch in rules", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("feat/brief");
+  });
+});
+
+// ─── buildBrief backward compatibility ───────────────────────────────────────
+
+describe("buildBrief backward compatibility", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("dispatches to buildImplementationBrief for non-QA tasks", () => {
+    const task = makeTask();
+    const briefOld = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+    const briefNew = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(briefOld).toBe(briefNew);
+  });
+
+  it("dispatches to buildQABrief for QA tasks", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("# QA Agent");
+    expect(brief).toContain("QA agent");
   });
 });
 
@@ -323,7 +590,7 @@ describe("buildBrief for QA tasks", () => {
 
   it("includes qa-agent.md content for type: qa", () => {
     const task = makeTask({ type: "qa" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("# QA Agent");
     expect(brief).toContain("You are a QA validation agent.");
   });
@@ -339,7 +606,7 @@ describe("buildBrief for QA tasks", () => {
     const qaTask = makeTask({ id: 20, type: "qa", dependsOn: [10] });
     const allTasks = [depTask, qaTask];
 
-    const brief = buildBrief(qaTask, allTasks, "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(qaTask, allTasks, "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("Task 10: Add auth");
     expect(brief).toContain("User can sign up");
     expect(brief).toContain("User can log in");
@@ -349,7 +616,7 @@ describe("buildBrief for QA tasks", () => {
 
   it("does NOT include plan-review or session-review workflow phases", () => {
     const task = makeTask({ type: "qa" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).not.toContain("# Plan Review");
     expect(brief).not.toContain("# Session Review");
     expect(brief).not.toContain("Phase 1-2");
@@ -359,64 +626,76 @@ describe("buildBrief for QA tasks", () => {
 
   it("includes agent-orientation and quality-standards", () => {
     const task = makeTask({ type: "qa" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("# Agent Orientation");
     expect(brief).toContain("# Quality Standards");
   });
 
   it("identifies itself as QA agent in task context", () => {
     const task = makeTask({ id: 5, title: "Validate integration", type: "qa" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("QA agent");
     expect(brief).toContain("Task 5: Validate integration");
   });
 
   it("includes qa-report artifact path in rules", () => {
     const task = makeTask({ type: "qa" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("/fake/project/artifacts/t13-qa-report.md");
     expect(brief).toContain("markdown table");
   });
 
   it("includes artifacts path for memory entry in rules", () => {
     const task = makeTask({ id: 20, type: "qa" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("/fake/project/artifacts/t20-memory-entry.md");
   });
 
   it("instructs agents to save artifacts outside repo root", () => {
     const task = makeTask({ type: "qa" });
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
     expect(brief).toContain("never to the repo root");
   });
 });
 
 // ─── Sub-Agent Model Injection ──────────────────────────────────────────────
 
-describe("buildBrief sub-agent model injection", () => {
+describe("sub-agent model injection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     stubReadFileSync();
     (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
   });
 
-  it("includes Sub-Agent Models section in implementation briefs", () => {
+  it("implementation brief includes only codeReview hint", () => {
     const task = makeTask();
     const models = defaultModelConfig();
     const provider = mockProvider();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief", models, provider);
+
+    expect(brief).toContain("## Sub-Agent Models");
+    expect(brief).toContain('Code Review sub-agents: model: "sonnet"');
+    expect(brief).not.toContain("Explore sub-agents");
+    expect(brief).not.toContain("Plan Review sub-agents");
+  });
+
+  it("architect brief includes explore + planReview hints", () => {
+    const task = makeTask();
+    const models = defaultModelConfig();
+    const provider = mockProvider();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief", models, provider);
 
     expect(brief).toContain("## Sub-Agent Models");
     expect(brief).toContain('Explore sub-agents: model: "sonnet"');
     expect(brief).toContain('Plan Review sub-agents: model: "opus"');
-    expect(brief).toContain('Code Review sub-agents: model: "sonnet"');
+    expect(brief).not.toContain("Code Review sub-agents");
   });
 
-  it("includes Sub-Agent Models section in QA briefs with fixer hint only", () => {
+  it("QA brief includes only fixer hint", () => {
     const task = makeTask({ type: "qa" });
     const models = defaultModelConfig();
     const provider = mockProvider();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief", models, provider);
 
     expect(brief).toContain("## Sub-Agent Models");
     expect(brief).toContain('Fixer sub-agents: model: "opus"');
@@ -428,18 +707,167 @@ describe("buildBrief sub-agent model injection", () => {
   it("uses custom model hints when config overrides defaults", () => {
     const task = makeTask();
     const models = defaultModelConfig();
-    models.explore = { provider: "claude", model: "claude-haiku-4-5-20251001" };
+    models.implementation.subagents.codeReview = { model: "claude-haiku-4-5-20251001" };
     const provider = mockProvider();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief", models, provider);
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief", models, provider);
 
-    expect(brief).toContain('Explore sub-agents: model: "haiku"');
-    expect(brief).toContain('Plan Review sub-agents: model: "opus"');
+    expect(brief).toContain('Code Review sub-agents: model: "haiku"');
   });
 
   it("omits Sub-Agent Models section when models/provider not provided", () => {
     const task = makeTask();
-    const brief = buildBrief(task, [task], "/fake/project", "design.md", "manifest.json", "feat/brief");
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).not.toContain("## Sub-Agent Models");
+  });
+
+  it("Ollama provider uses inherits-parent text instead of model hint", () => {
+    const task = makeTask();
+    const models = defaultModelConfig();
+    models.implementation.provider = "ollama";
+    const provider = mockOllamaProvider();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief", models, provider);
+
+    expect(brief).toContain("## Sub-Agent Models");
+    expect(brief).toContain("inherits parent model");
+    expect(brief).toContain("do not specify a model parameter");
+    expect(brief).not.toContain('model: ""');
+  });
+
+  it("architect brief with Ollama provider uses inherits-parent text", () => {
+    const task = makeTask();
+    const models = defaultModelConfig();
+    models.architect.provider = "ollama";
+    const provider = mockOllamaProvider();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief", models, provider);
+
+    expect(brief).toContain("## Sub-Agent Models");
+    expect(brief).toContain("inherits parent model");
+    expect(brief).not.toContain('model: ""');
+  });
+});
+
+// ─── Inline design doc + manifest ────────────────────────────────────────────
+
+describe("inline design doc and manifest content", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("implementation brief includes ## Design Document section with content", () => {
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("## Design Document");
+    expect(brief).toContain("# Design");
+    expect(brief).toContain("Full design content.");
+  });
+
+  it("implementation brief includes ## Task Manifest section with content", () => {
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("## Task Manifest");
+    expect(brief).toContain("# Manifest");
+    expect(brief).toContain("Full manifest content.");
+  });
+
+  it("implementation brief omits ## Design Document when designDoc is empty string", () => {
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("## Design Document");
+  });
+
+  it("implementation brief omits ## Task Manifest when manifest is empty string", () => {
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "", "feat/brief");
+
+    expect(brief).not.toContain("## Task Manifest");
+  });
+
+  it("architect brief includes ## Design Document and ## Task Manifest", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nArch design.", "# Manifest\nArch manifest.", "feat/brief");
+
+    expect(brief).toContain("## Design Document");
+    expect(brief).toContain("# Design");
+    expect(brief).toContain("Arch design.");
+    expect(brief).toContain("## Task Manifest");
+    expect(brief).toContain("# Manifest");
+    expect(brief).toContain("Arch manifest.");
+  });
+
+  it("QA brief includes ## Design Document and ## Task Manifest", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "# Design\nQA design.", "# Manifest\nQA manifest.", "feat/brief");
+
+    expect(brief).toContain("## Design Document");
+    expect(brief).toContain("## Task Manifest");
+  });
+});
+
+// ─── Explore targets ─────────────────────────────────────────────────────────
+
+describe("explore targets in architect brief", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("uses manifest explore targets when present", () => {
+    const task = makeTask({ explore: ["How auth works — for routing"] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
+
+    expect(brief).toContain("How auth works — for routing");
+  });
+
+  it("falls back to inferred hints when explore is empty and creates has paths", () => {
+    const task = makeTask({ explore: [], creates: ["src/foo.ts"], modifies: [] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
+
+    expect(brief).toContain("Explore src/ for existing patterns");
+  });
+
+  it("uses only manifest targets when both explore items and creates paths exist", () => {
+    const task = makeTask({ explore: ["How config loader works"], creates: ["src/foo.ts"], modifies: [] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
+
+    expect(brief).toContain("How config loader works");
+    expect(brief).not.toContain("Explore src/ for existing patterns");
+  });
+});
+
+// ─── Shell anti-patterns ─────────────────────────────────────────────────────
+
+describe("shell anti-patterns inclusion", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("implementation brief includes shell anti-patterns", () => {
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
+
+    expect(brief).toContain("# Shell Anti-Patterns");
+  });
+
+  it("QA brief includes shell anti-patterns", () => {
+    const task = makeTask({ type: "qa" });
+    const brief = buildBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
+
+    expect(brief).toContain("# Shell Anti-Patterns");
+  });
+
+  it("architect brief does NOT include shell anti-patterns", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
+
+    expect(brief).not.toContain("# Shell Anti-Patterns");
   });
 });

@@ -1,5 +1,10 @@
 import type { ChildProcess } from "node:child_process";
 
+// ─── Complexity ───────────────────────────────────────────────────────────
+
+/** Tasks at or below this complexity skip the architect phase and go directly to implementation. */
+export const LOW_COMPLEXITY_THRESHOLD = 2;
+
 // ─── Task Status ──────────────────────────────────────────────────────────
 
 export type TaskStatus =
@@ -47,6 +52,7 @@ export interface Task {
   modifies: string[];
   dependsOn: number[];
   requirements: string[];
+  explore: string[];
   tddPhase: TddPhase;
   commitMessage: string;
   complexity: number;
@@ -60,33 +66,68 @@ export interface Task {
   process?: ChildProcess;
   worktreePath?: string;
   logPath?: string;
+  provider?: string;
+}
+
+// ─── Ollama Config ────────────────────────────────────────────────────────
+
+export interface OllamaConfig {
+  baseUrl: string;
+  fallback: boolean;
 }
 
 // ─── Model Config ─────────────────────────────────────────────────────────
 
-export interface AgentSlotConfig {
-  provider: string;
+export interface SubagentConfig {
   model: string;
 }
 
+export interface AgentConfig {
+  provider: string;
+  model: string;
+  subagents: Record<string, SubagentConfig>;
+}
+
 export interface ModelConfig {
-  implementation: AgentSlotConfig;
-  qa:             AgentSlotConfig;
-  explore:        AgentSlotConfig;
-  planReview:     AgentSlotConfig;
-  codeReview:     AgentSlotConfig;
-  qaFixer:        AgentSlotConfig;
+  architect:      AgentConfig;
+  implementation: AgentConfig;
+  qa:             AgentConfig;
 }
 
 export function defaultModelConfig(): ModelConfig {
   return {
-    implementation: { provider: "claude", model: "claude-opus-4-6" },
-    qa:             { provider: "claude", model: "claude-opus-4-6" },
-    explore:        { provider: "claude", model: "claude-sonnet-4-6" },
-    planReview:     { provider: "claude", model: "claude-opus-4-6" },
-    codeReview:     { provider: "claude", model: "claude-sonnet-4-6" },
-    qaFixer:        { provider: "claude", model: "claude-opus-4-6" },
+    architect: {
+      provider: "claude",
+      model: "claude-opus-4-6",
+      subagents: {
+        explore: { model: "claude-sonnet-4-6" },
+        planReview: { model: "claude-opus-4-6" },
+      },
+    },
+    implementation: {
+      provider: "claude",
+      model: "claude-opus-4-6",
+      subagents: {
+        codeReview: { model: "claude-sonnet-4-6" },
+      },
+    },
+    qa: {
+      provider: "claude",
+      model: "claude-opus-4-6",
+      subagents: {
+        qaFixer: { model: "claude-opus-4-6" },
+      },
+    },
   };
+}
+
+// ─── Project Config ───────────────────────────────────────────────────────
+
+export interface ProjectConfig {
+  ollama?: OllamaConfig;
+  agents: ModelConfig;
+  concurrency: number;
+  branch?: string;
 }
 
 // ─── Stream Events ────────────────────────────────────────────────────────
@@ -114,7 +155,7 @@ export interface Provider {
   createStreamParser(): StreamParser;
   healthCheck(): Promise<boolean>;
   /** Translates a full model ID to the Agent tool shorthand for this provider. */
-  subagentModelHint(fullModel: string): string;
+  subagentModelHint(fullModel: string, providerName: string): string;
 }
 
 // ─── Spawn Options ────────────────────────────────────────────────────────
@@ -124,6 +165,7 @@ export interface SpawnOpts {
   model: string;
   cwd: string;
   verbose: boolean;
+  env?: Record<string, string>;
 }
 
 // ─── CLI Arguments ────────────────────────────────────────────────────────
@@ -132,6 +174,7 @@ export interface CLIArgs {
   projectPath: string;
   concurrency: number;
   models: ModelConfig;
+  ollama?: OllamaConfig;
   branch: string;
   taskFilter: number[] | null;
   dryRun: boolean;

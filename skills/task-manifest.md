@@ -32,6 +32,9 @@ Each task must include:
   - Second requirement
     - Sub-detail
   - Third requirement
+- **Explore:**
+  - How the auth middleware validates tokens — for inserting PII redaction at the right pipeline stage
+  - What regex patterns exist — for detecting PII formats
 - **Type:** QA (or omit for implementation tasks)
 - **TDD Phase:** `RED`, `GREEN`, `REFACTOR` (or Exempt)
 - **Commit:** `task N: description`
@@ -42,9 +45,17 @@ Each task must include:
 ## Rules
 
 ### Dependency Inference
+
+Each task runs in an **isolated git worktree** that only contains code merged from its completed dependencies — nothing else exists.
+
 - Honor explicit dependencies from the design doc
-- Infer implicit dependencies from file/data-flow coupling (if Task B modifies a file Task A creates, B depends on A)
+- Infer implicit dependencies: if Task B needs anything Task A produces to build, test, or run — files, packages, config, toolchains, project structure — B depends on A
+- **The worktree test**: for each task with `Depends on: (none)`, ask: "Could this task's agent succeed in a worktree containing only the repo's current main branch?" If not, it has a missing dependency
 - Ensure topologically valid ordering (no circular deps)
+
+### Explore Targets
+
+For each task, write 2-4 purpose-driven exploration targets. Each target should explain WHAT to look for and WHY it matters for this task. Omit for scaffolding tasks on brand-new projects where there's nothing to explore. These targets are passed directly to the Explore subagent — they should be specific questions, not generic directory listings.
 
 ### TDD Inference
 - **Default: TDD** for any task creating or modifying files with testable logic
@@ -137,7 +148,7 @@ T10: Final QA (depends on all)
 
 After generating the manifest:
 1. Dispatch a critic subagent via the Agent tool (max 3 rounds)
-2. Critic evaluates: completeness, security, DRY, dependency correctness, explore coverage, performance (algorithmic complexity, I/O patterns), code elegance (clean abstractions, minimal complexity), TDD coverage (are the right tasks marked TDD?), code organization (file structure, module boundaries), and debuggability (error handling patterns, informative errors)
+2. Critic evaluates: completeness, security, DRY, dependency correctness (apply the worktree test to every task — verify its isolated worktree will have everything it needs), explore coverage, performance (algorithmic complexity, I/O patterns), code elegance (clean abstractions, minimal complexity), TDD coverage (are the right tasks marked TDD?), code organization (file structure, module boundaries), and debuggability (error handling patterns, informative errors)
 3. Process feedback critically — push back on wrong suggestions
 4. Update manifest with accepted changes
 5. Write audit trail to `docs/liteboard/<slug>/architect-review.md`

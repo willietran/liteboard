@@ -2,13 +2,14 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task, CLIArgs, ModelConfig } from "./types.js";
-import { defaultModelConfig } from "./types.js";
+import type { Task, CLIArgs } from "./types.js";
+import { defaultModelConfig, LOW_COMPLEXITY_THRESHOLD } from "./types.js";
 import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
 import { appendMemoryEntry } from "./memory.js";
-import { createProvider } from "./provider.js";
+import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, checkOllamaModel, pullOllamaModel, getProviderEnv } from "./provider.js";
+import { parseProjectConfig, validateConfig, hasOllamaProvider, applyOllamaFallback } from "./config.js";
 import {
   setupFeatureBranch,
   createWorktree,
@@ -19,8 +20,8 @@ import {
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
-import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN } from "./dashboard.js";
-import { buildBrief } from "./brief.js";
+import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, ENTER_ALT_SCREEN, EXIT_ALT_SCREEN } from "./dashboard.js";
+import { buildBrief, buildArchitectBrief, buildImplementationBrief } from "./brief.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
 
@@ -41,11 +42,17 @@ function log(msg: string): void {
 function parseArgs(): CLIArgs {
   const args = process.argv.slice(2);
 
+  if (args[0] && args[0] !== "run" && !args[0].startsWith("--")) {
+    console.error(`\x1b[31mError:\x1b[0m Unknown subcommand: ${args[0]}`);
+    console.error(`Did you mean: liteboard run <project-path>  or  liteboard-setup`);
+    process.exit(1);
+  }
+
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
     console.log(`Usage: liteboard run <project-path-or-slug> [options]
 
 Options:
-  --concurrency=<N>       Max parallel agents, 1-5 (default: 1)
+  --concurrency=<N>       Max parallel agents (default: 1)
   --model=<model>         Override implementation model
   --branch=<name>         Feature branch name
   --tasks=<1,2,3>         Run specific task IDs only
@@ -68,9 +75,9 @@ Options:
   for (const arg of args) {
     if (arg === "run") continue;
     if (arg.startsWith("--concurrency=")) {
-      concurrency = Math.max(1, Math.min(5, parseInt(arg.slice("--concurrency=".length), 10)));
+      concurrency = Math.max(1, parseInt(arg.slice("--concurrency=".length), 10) || 1);
     } else if (arg.startsWith("--model=")) {
-      models.implementation = { ...models.implementation, model: arg.slice("--model=".length) };
+      models.implementation.model = arg.slice("--model=".length);
     } else if (arg.startsWith("--branch=")) {
       branch = arg.slice("--branch=".length);
     } else if (arg.startsWith("--tasks=")) {
@@ -108,7 +115,7 @@ Options:
 
 // ─── Startup Checks ─────────────────────────────────────────────────────
 
-function checkPrereqs(args: CLIArgs): void {
+async function checkPrereqs(args: CLIArgs): Promise<void> {
   try {
     execFileSync("git", ["rev-parse", "--git-dir"], { stdio: "pipe" });
   } catch {
@@ -141,6 +148,42 @@ function checkPrereqs(args: CLIArgs): void {
     }
   } catch {
     // pgrep returns non-zero if no matches
+  }
+
+  // Ollama health check
+  const projectConfig = { agents: args.models, concurrency: args.concurrency, ollama: args.ollama };
+  if (hasOllamaProvider(projectConfig)) {
+    const baseUrl = args.ollama?.baseUrl ?? "http://localhost:11434";
+    validateOllamaBaseUrl(baseUrl);
+    const healthy = await checkOllamaHealth(baseUrl);
+    if (!healthy) {
+      if (args.ollama?.fallback) {
+        applyOllamaFallback(projectConfig);
+        // args.models is mutated in-place (same reference as projectConfig.agents)
+      } else {
+        die(`Ollama is not reachable at ${baseUrl}. Start Ollama or set fallback: true in config.json.`);
+      }
+    } else {
+      // Server is healthy — verify each Ollama model is registered
+      const ollamaModels = new Set<string>();
+      for (const agent of Object.values(args.models)) {
+        if (agent.provider === "ollama") ollamaModels.add(agent.model);
+      }
+      const modelChecks = await Promise.all(
+        [...ollamaModels].map(async (model) => ({
+          model,
+          available: await checkOllamaModel(baseUrl, model),
+        })),
+      );
+      for (const { model, available } of modelChecks) {
+        if (!available) {
+          log(`Ollama model '${model}' not registered. Pulling...`);
+          if (!pullOllamaModel(model)) {
+            die(`Failed to pull Ollama model '${model}' (timed out after 30s). Run manually: ollama pull ${model}`);
+          }
+        }
+      }
+    }
   }
 }
 
@@ -182,12 +225,48 @@ function ensureGitignores(projectDir: string): void {
 async function main(): Promise<void> {
   const args = parseArgs();
   setForcePipeMode(args.noTui);
-  checkPrereqs(args);
-  ensureGitignores(args.projectPath);
 
   const slug = path.basename(args.projectPath);
   const manifestPath = path.join(args.projectPath, "manifest.md");
   const designPath = path.join(args.projectPath, "design.md");
+
+
+  // Load and merge config.json (before checkPrereqs so Ollama health check has config)
+  const configPath = path.join(args.projectPath, "config.json");
+  const projectConfig = parseProjectConfig(configPath);
+
+  // Apply config values — CLI flags take priority
+  if (!process.argv.some(a => a.startsWith("--concurrency"))) {
+    args.concurrency = projectConfig.concurrency;
+  }
+  if (projectConfig.branch && !process.argv.some(a => a.startsWith("--branch"))) {
+    args.branch = projectConfig.branch;
+  }
+  const cliHasModel = process.argv.some(a => a.startsWith("--model"));
+  for (const role of ["architect", "implementation", "qa"] as const) {
+    if (role === "implementation" && cliHasModel) {
+      // Keep CLI-provided model, take other fields from config
+      args.models[role].provider = projectConfig.agents[role].provider;
+      args.models[role].subagents = projectConfig.agents[role].subagents;
+    } else {
+      args.models[role] = projectConfig.agents[role];
+    }
+  }
+  args.ollama = projectConfig.ollama;
+
+  validateConfig({ agents: args.models, concurrency: args.concurrency, ollama: args.ollama });
+
+  await checkPrereqs(args);
+  ensureGitignores(args.projectPath);
+
+  // Read docs once; pass inline content to all brief builders
+  const designDoc = fs.existsSync(designPath) ? fs.readFileSync(designPath, "utf-8") : "";
+  const manifestContent = fs.readFileSync(manifestPath, "utf-8");
+
+  // Warn if combined inline content is very large
+  if (designDoc.length + manifestContent.length > 100_000) {
+    log(`\x1b[33mWarning: inlined docs total ${Math.round((designDoc.length + manifestContent.length) / 1024)}KB — brief will be large\x1b[0m`);
+  }
 
   // Parse manifest
   const tasks = parseManifest(manifestPath);
@@ -226,32 +305,6 @@ async function main(): Promise<void> {
     console.log(`\n  Total: ${filteredTasks.length} tasks, ${layers.length} layers`);
     console.log(`  Max parallelism: ${Math.max(...layers.map(l => l.taskIds.length))}\n`);
     process.exit(0);
-  }
-
-  // Read config.json if exists
-  const configPath = path.join(args.projectPath, "config.json");
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      if (config.concurrency && !process.argv.some(a => a.startsWith("--concurrency"))) {
-        args.concurrency = config.concurrency;
-      }
-      if (config.branch && !process.argv.some(a => a.startsWith("--branch"))) {
-        args.branch = config.branch;
-      }
-      // Merge model slots from config.json (CLI --model flag takes priority for implementation)
-      if (config.models) {
-        const cliHasModel = process.argv.some(a => a.startsWith("--model"));
-        for (const slot of ["implementation", "qa", "explore", "planReview", "codeReview", "qaFixer"] as const) {
-          if (config.models[slot]?.provider || config.models[slot]?.model) {
-            if (slot === "implementation" && cliHasModel) continue;
-            args.models[slot] = { ...args.models[slot], ...config.models[slot] };
-          }
-        }
-      }
-    } catch {
-      log("\x1b[33mWarning: Could not parse config.json\x1b[0m");
-    }
   }
 
   // Startup cleanup
@@ -315,7 +368,10 @@ async function main(): Promise<void> {
   }
 
   // Dashboard interval
-  if (isTTY()) process.stdout.write(HIDE_CURSOR + CLEAR_SCREEN);
+  if (isTTY()) process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
+  process.on("exit", () => {
+    if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
+  });
   const dashboardInterval = setInterval(() => {
     renderStatus(filteredTasks, args.projectPath);
   }, 1000);
@@ -335,7 +391,7 @@ async function main(): Promise<void> {
 
     setTimeout(() => {
       clearInterval(dashboardInterval);
-      if (isTTY()) process.stdout.write(SHOW_CURSOR);
+      if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
       cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose, { preserveFailedBranches: true });
       writeProgress(filteredTasks, args.projectPath);
       process.exit(1);
@@ -349,15 +405,152 @@ async function main(): Promise<void> {
     task.startedAt = new Date().toISOString();
 
     let wp: string;
-    let child: ReturnType<typeof spawnAgent>;
     try {
       wp = createWorktree(slug, task.id, args.branch, args.verbose);
       task.worktreePath = wp;
+    } catch (e: unknown) {
+      task.status = "failed";
+      task.stage = "";
+      task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+      cleanupWorktree(slug, task.id, args.branch, args.verbose);
+      writeProgress(filteredTasks, args.projectPath);
+      updateStatuses();
+      return;
+    }
 
-      const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
-      const directModel = task.type === "qa" ? args.models.qa.model : args.models.implementation.model;
-      child = spawnAgent(task, brief, provider, directModel, wp, args.projectPath, args.verbose);
-      task.process = child;
+    // Shared close handler for the final phase (implementation or QA)
+    const handleFinalClose = async (code: number | null, resolve: () => void) => {
+      if (code === 0) {
+        try {
+          // Read memory entry from artifacts directory
+          const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
+          let memBody = "";
+          if (fs.existsSync(memEntryPath)) {
+            memBody = fs.readFileSync(memEntryPath, "utf-8");
+          }
+
+          // Check if task produced any changes to merge
+          let hasDiff = true;
+          try {
+            git(["diff", "--quiet", args.branch, `${args.branch}-t${task.id}`], { verbose: args.verbose });
+            hasDiff = false; // exit 0 = no diff
+          } catch {
+            // exit 1 = has diff (expected for implementation tasks)
+          }
+
+          if (!hasDiff) {
+            // No changes to merge (QA passed clean, or edge case)
+            if (memBody) {
+              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+            }
+            task.status = "done";
+            task.stage = "";
+            task.completedAt = new Date().toISOString();
+          } else {
+            // Normal merge path
+            task.stage = "Merging";
+            await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
+
+            // Append memory AFTER successful merge
+            if (memBody) {
+              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+            }
+
+            task.status = "done";
+            task.stage = "";
+            task.completedAt = new Date().toISOString();
+          }
+        } catch (e: unknown) {
+          task.status = "failed";
+          task.stage = "";
+          task.lastLine = `[MERGE FAILED] ${(e instanceof Error ? e.message : String(e)).slice(0, 100)}`;
+        }
+      } else {
+        task.status = "failed";
+        task.stage = "";
+        task.lastLine = task.lastLine || `[EXIT ${code}]`;
+      }
+
+      // Capture QA report from artifacts directory
+      if (task.type === "qa") {
+        const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
+        if (fs.existsSync(qaReportPath)) {
+          qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
+        }
+      }
+
+      // Cleanup worktree — preserve task branch on merge failure for recovery
+      const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
+      cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
+      if (preserveBranch) {
+        log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
+      }
+      writeProgress(filteredTasks, args.projectPath);
+      updateStatuses();
+      activePromises.delete(task.id);
+      resolve();
+    };
+
+    // QA tasks: single-phase spawn (no architect)
+    if (task.type === "qa") {
+      task.provider = args.models.qa.provider;
+      let child: ReturnType<typeof spawnAgent>;
+      try {
+        const brief = buildBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
+        const qaEnv = getProviderEnv(args.models.qa.provider, args.ollama);
+        child = spawnAgent(task, brief, provider, args.models.qa.model, wp, args.projectPath, args.verbose, qaEnv);
+        task.process = child;
+      } catch (e: unknown) {
+        task.status = "failed";
+        task.stage = "";
+        task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+        cleanupWorktree(slug, task.id, args.branch, args.verbose);
+        writeProgress(filteredTasks, args.projectPath);
+        updateStatuses();
+        return;
+      }
+
+      const promise = new Promise<void>((resolve) => {
+        child.on("close", (code) => handleFinalClose(code, resolve));
+      });
+      activePromises.set(task.id, promise);
+      return;
+    }
+
+    // Low-complexity tasks: single-phase implementation (no architect)
+    if (task.complexity <= LOW_COMPLEXITY_THRESHOLD) {
+      task.provider = args.models.implementation.provider;
+      let child: ReturnType<typeof spawnAgent>;
+      try {
+        const brief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
+        const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
+        child = spawnAgent(task, brief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
+        task.process = child;
+      } catch (e: unknown) {
+        task.status = "failed";
+        task.stage = "";
+        task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+        cleanupWorktree(slug, task.id, args.branch, args.verbose);
+        writeProgress(filteredTasks, args.projectPath);
+        updateStatuses();
+        return;
+      }
+
+      const promise = new Promise<void>((resolve) => {
+        child.on("close", (code) => handleFinalClose(code, resolve));
+      });
+      activePromises.set(task.id, promise);
+      return;
+    }
+
+    // Non-QA, higher-complexity tasks: two-phase architect → implementation
+    task.provider = args.models.architect.provider;
+    let architectChild: ReturnType<typeof spawnAgent>;
+    try {
+      const architectBrief = buildArchitectBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
+      const architectEnv = getProviderEnv(args.models.architect.provider, args.ollama);
+      architectChild = spawnAgent(task, architectBrief, provider, args.models.architect.model, wp, args.projectPath, args.verbose, architectEnv);
+      task.process = architectChild;
     } catch (e: unknown) {
       task.status = "failed";
       task.stage = "";
@@ -369,76 +562,64 @@ async function main(): Promise<void> {
     }
 
     const promise = new Promise<void>((resolve) => {
-      child.on("close", async (code) => {
-        if (code === 0) {
-          try {
-            // Read memory entry from artifacts directory
-            const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
-            let memBody = "";
-            if (fs.existsSync(memEntryPath)) {
-              memBody = fs.readFileSync(memEntryPath, "utf-8");
-            }
-
-            // Check if task produced any changes to merge
-            let hasDiff = true;
-            try {
-              git(["diff", "--quiet", args.branch, `${args.branch}-t${task.id}`], { verbose: args.verbose });
-              hasDiff = false; // exit 0 = no diff
-            } catch {
-              // exit 1 = has diff (expected for implementation tasks)
-            }
-
-            if (!hasDiff) {
-              // No changes to merge (QA passed clean, or edge case)
-              if (memBody) {
-                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
-              }
-              task.status = "done";
-              task.stage = "";
-              task.completedAt = new Date().toISOString();
-            } else {
-              // Normal merge path
-              task.stage = "Merging";
-              await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
-
-              // Append memory AFTER successful merge
-              if (memBody) {
-                await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
-              }
-
-              task.status = "done";
-              task.stage = "";
-              task.completedAt = new Date().toISOString();
-            }
-          } catch (e: unknown) {
-            task.status = "failed";
-            task.stage = "";
-            task.lastLine = `[MERGE FAILED] ${(e instanceof Error ? e.message : String(e)).slice(0, 100)}`;
-          }
-        } else {
+      architectChild.on("close", (architectCode) => {
+        if (architectCode !== 0) {
           task.status = "failed";
           task.stage = "";
-          task.lastLine = task.lastLine || `[EXIT ${code}]`;
+          task.lastLine = `[ARCHITECT EXIT ${architectCode}]`;
+          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          writeProgress(filteredTasks, args.projectPath);
+          updateStatuses();
+          activePromises.delete(task.id);
+          resolve();
+          return;
         }
 
-        // Capture QA report from artifacts directory
-        if (task.type === "qa") {
-          const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
-          if (fs.existsSync(qaReportPath)) {
-            qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
-          }
+        // Verify plan was written
+        const planPath = path.join(artifactsDir(args.projectPath), `t${task.id}-task-plan.md`);
+        if (!fs.existsSync(planPath)) {
+          task.status = "failed";
+          task.stage = "";
+          task.lastLine = "[ARCHITECT] No task plan produced";
+          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          writeProgress(filteredTasks, args.projectPath);
+          updateStatuses();
+          activePromises.delete(task.id);
+          resolve();
+          return;
         }
 
-        // Cleanup worktree — preserve task branch on merge failure for recovery
-        const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
-        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
-        if (preserveBranch) {
-          log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
+        // Reset task state for phase 2 handoff
+        task.stage = "";
+        task.lastLine = "";
+        task.bytesReceived = 0;
+        task.turnCount = 0;
+
+        // Rename architect log and brief for debugging
+        const logDir = path.join(args.projectPath, "logs");
+        try { fs.renameSync(path.join(logDir, `t${task.id}.jsonl`), path.join(logDir, `t${task.id}-architect.jsonl`)); } catch {}
+        const artPath = artifactsDir(args.projectPath);
+        try { fs.renameSync(path.join(artPath, `t${task.id}-brief.md`), path.join(artPath, `t${task.id}-architect-brief.md`)); } catch {}
+
+        // Phase 2: Implementation
+        task.provider = args.models.implementation.provider;
+        try {
+          const implBrief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
+          const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
+          const implChild = spawnAgent(task, implBrief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
+          task.process = implChild; // Dashboard + stall detection now tracks implementation process
+
+          implChild.on("close", (code) => handleFinalClose(code, resolve));
+        } catch (e: unknown) {
+          task.status = "failed";
+          task.stage = "";
+          task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          writeProgress(filteredTasks, args.projectPath);
+          updateStatuses();
+          activePromises.delete(task.id);
+          resolve();
         }
-        writeProgress(filteredTasks, args.projectPath);
-        updateStatuses();
-        activePromises.delete(task.id);
-        resolve();
       });
     });
 
@@ -474,15 +655,17 @@ async function main(): Promise<void> {
     }
 
     // Spawn queued tasks up to concurrency limit
-    if (runningTasks.length < args.concurrency && queuedTasks.length > 0) {
+    if (activePromises.size < args.concurrency && queuedTasks.length > 0) {
+      const spawnedThisIteration: Task[] = [];
       for (const task of queuedTasks) {
-        if (runningTasks.length + activePromises.size >= args.concurrency) break;
+        if (activePromises.size >= args.concurrency) break;
 
-        // Check file conflicts with running tasks
-        const hasConflict = runningTasks.some(rt => hasFileConflict(task, rt));
+        // Check file conflicts with running tasks and those spawned earlier this iteration
+        const hasConflict = [...runningTasks, ...spawnedThisIteration].some(rt => hasFileConflict(task, rt));
         if (hasConflict) continue;
 
         spawnTask(task);
+        spawnedThisIteration.push(task);
       }
     }
 
@@ -505,7 +688,7 @@ async function main(): Promise<void> {
   const done = filteredTasks.filter(t => t.status === "done").length;
   const failed = filteredTasks.filter(t => t.status === "failed").length;
 
-  if (isTTY()) process.stdout.write(SHOW_CURSOR);
+  if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   console.log("");
   console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
 
@@ -524,7 +707,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(e => {
-  if (isTTY()) process.stdout.write(SHOW_CURSOR);
+  if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   console.error(e);
   process.exit(1);
 });

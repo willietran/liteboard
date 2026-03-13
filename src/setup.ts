@@ -84,8 +84,8 @@ function main(): void {
 // Only run when executed directly (not when imported for testing)
 const isMainModule =
   process.argv[1] &&
-  path.resolve(process.argv[1]) ===
-    path.resolve(fileURLToPath(import.meta.url));
+  fs.realpathSync(process.argv[1]) ===
+    fs.realpathSync(fileURLToPath(import.meta.url));
 if (isMainModule) {
   main();
 }

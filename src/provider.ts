@@ -1,6 +1,6 @@
 import { spawn, execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import type { Provider, SpawnOpts, StreamEvent, StreamParser } from "./types.js";
+import type { Provider, SpawnOpts, StreamEvent, StreamParser, OllamaConfig } from "./types.js";
 
 // ─── Claude Code Provider ──────────────────────────────────────────────────
 
@@ -21,6 +21,14 @@ export class ClaudeCodeProvider implements Provider {
 
     // Clone env and strip CLAUDECODE to prevent recursive invocation
     const env = { ...process.env };
+    delete env.CLAUDECODE;
+
+    // Inject provider-specific env vars (e.g., Ollama base URL)
+    if (opts.env) {
+      Object.assign(env, opts.env);
+    }
+
+    // Defense-in-depth: ensure CLAUDECODE is never re-inserted via opts.env
     delete env.CLAUDECODE;
 
     return spawn("claude", args, {
@@ -75,9 +83,10 @@ export class ClaudeCodeProvider implements Provider {
 
   private _singleParser?: StreamParser;
 
-  // Claude-specific: maps full model IDs to Agent tool shorthand.
-  // Future providers (OpenAI, Ollama) will implement their own version.
-  subagentModelHint(fullModel: string): string {
+  // Maps full model IDs to Agent tool shorthand.
+  // Claude: opus/sonnet/haiku. Ollama: empty (subagents inherit parent model).
+  subagentModelHint(fullModel: string, providerName: string): string {
+    if (providerName !== "claude") return "";
     if (fullModel.includes("opus")) return "opus";
     if (fullModel.includes("haiku")) return "haiku";
     return "sonnet";
@@ -183,5 +192,75 @@ export function createProvider(name: string): Provider {
       return new ClaudeCodeProvider();
     default:
       throw new Error(`Unknown provider: "${name}"`);
+  }
+}
+
+// ─── Ollama Helpers ─────────────────────────────────────────────────────────
+
+/** Returns provider-specific env vars for agent spawning, or undefined for Claude. */
+export function getProviderEnv(
+  providerName: string,
+  ollamaConfig?: OllamaConfig,
+): Record<string, string> | undefined {
+  if (providerName === "ollama") {
+    const baseUrl = ollamaConfig?.baseUrl ?? "http://localhost:11434";
+    return {
+      ANTHROPIC_BASE_URL: baseUrl,
+      ANTHROPIC_AUTH_TOKEN: "ollama",
+      ANTHROPIC_API_KEY: "",
+    };
+  }
+  return undefined;
+}
+
+/** Checks if Ollama is reachable at the given base URL. */
+export async function checkOllamaHealth(baseUrl: string): Promise<boolean> {
+  try {
+    const normalized = baseUrl.replace(/\/$/, "");
+    const response = await fetch(`${normalized}/api/tags`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Checks if a specific model is registered in Ollama via /api/show. */
+export async function checkOllamaModel(baseUrl: string, model: string): Promise<boolean> {
+  try {
+    const normalized = baseUrl.replace(/\/$/, "");
+    const response = await fetch(`${normalized}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Pulls an Ollama model. Returns true on success, false on failure/timeout. */
+export function pullOllamaModel(model: string): boolean {
+  try {
+    execFileSync("ollama", ["pull", model], { stdio: "pipe", timeout: 30000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Validates that an Ollama base URL is a valid http or https URL. Throws on invalid. */
+export function validateOllamaBaseUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Invalid ollama.baseUrl: must be an http:// or https:// URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Invalid ollama.baseUrl: must be an http:// or https:// URL");
   }
 }

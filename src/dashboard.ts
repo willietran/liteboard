@@ -2,13 +2,21 @@ import type { Task } from "./types.js";
 
 export const HIDE_CURSOR = "\x1b[?25l";
 export const SHOW_CURSOR = "\x1b[?25h";
-export const CLEAR_SCREEN = "\x1b[2J";
+export const ENTER_ALT_SCREEN = "\x1b[?1049h";
+export const EXIT_ALT_SCREEN = "\x1b[?1049l";
 
 const CURSOR_HOME = "\x1b[H";
 const CLEAR_TO_EOL = "\x1b[K";
 const CLEAR_BELOW = "\x1b[J";
 
 let forcePipeMode = false;
+let lastPipeStateKey = "";
+
+function pipeStateKey(tasks: Task[]): string {
+  return tasks
+    .map(t => `${t.id}:${t.status}:${t.turnCount}:${t.bytesReceived}:${t.stage ?? ""}:${t.lastLine ?? ""}`)
+    .join("|");
+}
 
 export function setForcePipeMode(value: boolean): void {
   forcePipeMode = value;
@@ -51,6 +59,18 @@ function truncate(s: string, maxLen: number): string {
   return s.length > maxLen ? s.slice(0, maxLen - 1) + "\u2026" : s;
 }
 
+function providerTag(task: Task): string {
+  if (task.provider === "ollama") return `${YELLOW}[O]${RESET} `;
+  return `${CYAN}[C]${RESET} `;
+}
+
+function clipSection(lines: string[], budget: number): string[] {
+  if (lines.length <= budget) return lines;
+  if (budget <= 0) return [];
+  if (budget === 1) return [`  ${DIM}... ${lines.length} rows clipped${RESET}`];
+  return [...lines.slice(0, budget - 1), `  ${DIM}... +${lines.length - budget + 1} more${RESET}`];
+}
+
 export function renderStatus(tasks: Task[], projectDir: string): void {
   const cols = process.stdout.columns || 80;
   const total = tasks.length;
@@ -60,21 +80,21 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   const queued = tasks.filter((t) => t.status === "queued");
   const blocked = tasks.filter((t) => t.status === "blocked");
 
-  const lines: string[] = [];
-
-  // Progress bar
+  // Header section (always shown)
+  const headerLines: string[] = [];
   const barWidth = Math.max(1, Math.min(40, cols - 30));
   const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
   const bar = "\u2588".repeat(filled) + "\u2591".repeat(barWidth - filled);
   const failStr = failed > 0 ? ` ${RED}${failed} failed${RESET}` : "";
-  lines.push(
+  headerLines.push(
     `${BOLD}Progress:${RESET} [${GREEN}${bar}${RESET}] ${done}/${total}${failStr}`,
   );
-  lines.push("");
+  headerLines.push("");
 
-  // Running tasks
+  // Running tasks section
+  const runningLines: string[] = [];
   if (running.length > 0) {
-    lines.push(`${BOLD}${CYAN}Running (${running.length}):${RESET}`);
+    runningLines.push(`${BOLD}${CYAN}Running (${running.length}):${RESET}`);
     for (const t of running) {
       const elapsed = formatElapsed(t.startedAt);
       const kb = (t.bytesReceived / 1024).toFixed(0);
@@ -84,54 +104,89 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
         ? ` ${YELLOW}${t.stage}${RESET}`
         : (t.bytesReceived > 0 ? ` ${GRAY}Working...${RESET}` : "");
       const stageWidth = t.stage ? t.stage.length + 1 : (t.bytesReceived > 0 ? 11 : 0);
-      const last = truncate(t.lastLine || "starting...", Math.max(1, cols - 55 - stageWidth));
-      lines.push(
-        `  ${CYAN}T${t.id}${RESET} ${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
+      const last = truncate(t.lastLine || "starting...", Math.max(1, cols - 59 - stageWidth));
+      runningLines.push(
+        `  ${CYAN}T${t.id}${RESET} ${providerTag(t)}${title}${stageLabel}  ${GRAY}${turnLabel} ${t.turnCount} | ${elapsed} | ${kb}KB${RESET}  ${DIM}${last}${RESET}`,
       );
     }
-    lines.push("");
+    runningLines.push("");
   }
 
-  // Status lists
+  // Summary lines (queued/blocked/done)
+  const summaryLines: string[] = [];
   if (queued.length > 0)
-    lines.push(
+    summaryLines.push(
       `${YELLOW}Queued (${queued.length}):${RESET} ${DIM}${queued.map((t) => `T${t.id}`).join(", ")}${RESET}`,
     );
   if (blocked.length > 0)
-    lines.push(
+    summaryLines.push(
       `${GRAY}Blocked (${blocked.length}):${RESET} ${DIM}${blocked.map((t) => `T${t.id}`).join(", ")}${RESET}`,
     );
   if (done > 0)
-    lines.push(
+    summaryLines.push(
       `${GREEN}Done (${done}):${RESET} ${DIM}${tasks
         .filter((t) => t.status === "done")
         .map((t) => `T${t.id}`)
         .join(", ")}${RESET}`,
     );
+
+  // Failed tasks section
+  const failedLines: string[] = [];
   if (failed > 0) {
-    lines.push(`${RED}Failed (${failed}):${RESET}`);
+    failedLines.push(`${RED}Failed (${failed}):${RESET}`);
     for (const t of tasks.filter((t) => t.status === "failed")) {
-      lines.push(
-        `  ${RED}T${t.id}${RESET} ${t.title}  ${DIM}${truncate(t.lastLine, Math.max(1, cols - 40))}${RESET}`,
+      failedLines.push(
+        `  ${RED}T${t.id}${RESET} ${providerTag(t)}${t.title}  ${DIM}${truncate(t.lastLine, Math.max(1, cols - 44))}${RESET}`,
       );
     }
   }
 
-  lines.push("");
-  lines.push(
+  // Footer section (always shown)
+  const footerLines: string[] = [
+    "",
     `${DIM}Logs: ${projectDir}/logs/t<N>.jsonl  (tail -f to watch)${RESET}`,
-  );
+  ];
 
   if (isTTY()) {
+    const maxRows = (process.stdout.rows || 24) - 1;
+    let budget = maxRows - headerLines.length - footerLines.length;
+
+    const clippedRunning = clipSection(runningLines, budget);
+    budget -= clippedRunning.length;
+
+    const clippedSummary = summaryLines.slice(0, budget);
+    budget -= clippedSummary.length;
+
+    const clippedFailed = clipSection(failedLines, budget);
+
+    const clippedLines = [...headerLines, ...clippedRunning, ...clippedSummary, ...clippedFailed, ...footerLines];
     const output = CURSOR_HOME
-      + lines.map((l) => l + CLEAR_TO_EOL).join("\n")
+      + clippedLines.map((l) => l + CLEAR_TO_EOL).join("\n")
       + "\n"
       + CLEAR_BELOW;
     process.stdout.write(output);
   } else {
-    for (const line of lines) {
-      console.log(line);
+    // Pipe mode: reorder for tail-view (Claude Code viewer shows last N lines).
+    // Progress bar goes last so it's always visible. Blank separators filtered out.
+    const pipeLines = [
+      ...footerLines,
+      ...runningLines,
+      ...summaryLines,
+      ...failedLines,
+      ...headerLines,
+    ].filter(l => l !== "");
+    const key = pipeStateKey(tasks);
+    if (key !== lastPipeStateKey) {
+      const isFirstEmission = lastPipeStateKey === "";
+      lastPipeStateKey = key;
+      // Emit blank lines before each frame after the first to push the previous
+      // frame above the Claude Code viewer's visible window (~9 lines).
+      if (!isFirstEmission) {
+        for (let i = 0; i < 10; i++) console.log("");
+      }
+      for (const line of pipeLines) {
+        console.log(line);
+      }
     }
   }
 }
-
