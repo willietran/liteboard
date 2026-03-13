@@ -70,6 +70,8 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   const total = tasks.length;
   const done = tasks.filter((t) => t.status === "done").length;
   const failed = tasks.filter((t) => t.status === "failed").length;
+  const needsHuman = tasks.filter((t) => t.status === "needs_human");
+  const merging = tasks.filter((t) => t.status === "merging");
   const running = tasks.filter((t) => t.status === "running");
   const queued = tasks.filter((t) => t.status === "queued");
   const blocked = tasks.filter((t) => t.status === "blocked");
@@ -77,11 +79,13 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
   // Header section (always shown)
   const headerLines: string[] = [];
   const barWidth = Math.max(1, Math.min(40, cols - 30));
-  const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
+  const terminal = done + needsHuman.length;
+  const filled = total > 0 ? Math.round((terminal / total) * barWidth) : 0;
   const bar = "\u2588".repeat(filled) + "\u2591".repeat(barWidth - filled);
   const failStr = failed > 0 ? ` ${RED}${failed} failed${RESET}` : "";
+  const nhStr = needsHuman.length > 0 ? ` ${YELLOW}${needsHuman.length} needs human${RESET}` : "";
   headerLines.push(
-    `${BOLD}Progress:${RESET} [${GREEN}${bar}${RESET}] ${done}/${total}${failStr}`,
+    `${BOLD}Progress:${RESET} [${GREEN}${bar}${RESET}] ${done}/${total}${failStr}${nhStr}`,
   );
   headerLines.push("");
 
@@ -106,6 +110,16 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
     runningLines.push("");
   }
 
+  if (merging.length > 0) {
+    runningLines.push(`${BOLD}${YELLOW}Merging (${merging.length}):${RESET}`);
+    for (const t of merging) {
+      runningLines.push(
+        `  ${YELLOW}T${t.id}${RESET} ${t.title}  ${DIM}[MERGING]${RESET}`,
+      );
+    }
+    runningLines.push("");
+  }
+
   // Summary lines (queued/blocked/done)
   const summaryLines: string[] = [];
   if (queued.length > 0)
@@ -122,6 +136,10 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
         .filter((t) => t.status === "done")
         .map((t) => `T${t.id}`)
         .join(", ")}${RESET}`,
+    );
+  if (needsHuman.length > 0)
+    summaryLines.push(
+      `${YELLOW}Needs Human (${needsHuman.length}):${RESET} ${DIM}${needsHuman.map((t) => `T${t.id}`).join(", ")}${RESET}`,
     );
 
   // Failed tasks section

@@ -142,8 +142,15 @@ export function cleanupAllWorktrees(
   opts?: { preserveFailedBranches?: boolean },
 ): void {
   for (const task of tasks) {
-    const preserveBranch = opts?.preserveFailedBranches &&
-      task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
+    // Preserve branch for tasks with salvageable work:
+    // - failed with merge failure (classic case)
+    // - needs_human (triage-escalated, human may want to recover the branch)
+    // - merging (in-flight merge attempt, branch contains committed work)
+    const preserveBranch = opts?.preserveFailedBranches && (
+      (task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]")) ||
+      task.status === "needs_human" ||
+      task.status === "merging"
+    );
     cleanupWorktree(slug, task.id, featureBranch, verbose, { preserveBranch });
   }
 }

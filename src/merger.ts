@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -83,54 +82,31 @@ export async function squashMerge(
       } catch {
         // Step 2: Conflict resolution
         try {
-          const conflictOutput = git(
-            ["diff", "--name-only", "--diff-filter=U"],
-            { verbose },
-          );
-          const conflictFiles = conflictOutput.split("\n").filter(Boolean);
-          const pkgConflicts = conflictFiles.filter(
-            (f) => f === "package.json" || f === "package-lock.json",
-          );
+          // All conflicts fail the merge — triage decides recovery strategy.
+          // Abort, squash task branch, rebase, retry.
+          // --squash does not create MERGE_HEAD, so merge --abort won't work.
+          // reset --hard restores the feature branch to its pre-merge state.
+          git(["reset", "--hard", "HEAD"], { verbose });
+          git(["clean", "-fd"], { verbose });
 
-          if (pkgConflicts.length === conflictFiles.length && conflictFiles.length > 0) {
-            // All conflicts are package files — auto-resolve
-            for (const f of pkgConflicts) {
-              git(["checkout", "--theirs", f], { verbose });
-              git(["add", f], { verbose });
-            }
-            execFileSync("npm", ["install"], {
-              cwd: repoRoot,
-              stdio: "pipe",
-              encoding: "utf-8",
-              timeout: NPM_TIMEOUT_MS,
-            });
-            git(["add", "package-lock.json"], { verbose });
-          } else {
-            // Other conflicts — abort, squash task branch, rebase, retry
-            // --squash does not create MERGE_HEAD, so merge --abort won't work.
-            // reset --hard restores the feature branch to its pre-merge state.
-            git(["reset", "--hard", "HEAD"], { verbose });
-            git(["clean", "-fd"], { verbose });
+          // Squash task branch to a single commit
+          git(["checkout", taskBranch], { verbose });
+          git(["reset", "--soft", featureBranch], { verbose });
+          commitViaFile(taskId, `squashed: ${commitMessage}`, verbose);
 
-            // Squash task branch to a single commit
-            git(["checkout", taskBranch], { verbose });
-            git(["reset", "--soft", featureBranch], { verbose });
-            commitViaFile(taskId, `squashed: ${commitMessage}`, verbose);
-
-            // Rebase onto feature branch
-            try {
-              git(["rebase", featureBranch], { verbose });
-            } catch {
-              git(["rebase", "--abort"], { verbose });
-              throw new Error(
-                `Rebase conflicts for task ${taskId} — marking failed`,
-              );
-            }
-
-            // Retry trial merge
-            git(["checkout", featureBranch], { verbose });
-            git(["merge", "--squash", "--no-commit", taskBranch], { verbose });
+          // Rebase onto feature branch
+          try {
+            git(["rebase", featureBranch], { verbose });
+          } catch {
+            git(["rebase", "--abort"], { verbose });
+            throw new Error(
+              `Rebase conflicts for task ${taskId} — marking failed`,
+            );
           }
+
+          // Retry trial merge
+          git(["checkout", featureBranch], { verbose });
+          git(["merge", "--squash", "--no-commit", taskBranch], { verbose });
         } catch (resolveErr) {
           try {
             git(["reset", "--hard", "HEAD"], { verbose });

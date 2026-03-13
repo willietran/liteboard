@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task, CLIArgs } from "./types.js";
+import type { Task, CLIArgs, FailureStage, ErrorClass, TriageDecision, DecisionContext } from "./types.js";
 import { defaultModelConfig, LOW_COMPLEXITY_THRESHOLD } from "./types.js";
 import { parseManifest } from "./parser.js";
 import { topologicalSort, hasFileConflict } from "./resolver.js";
@@ -20,6 +20,12 @@ import {
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";
+import {
+  gatherDecisionContext,
+  askTriage,
+  executeTriageAction,
+  writeDecisionRecord,
+} from "./triage.js";
 import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, ENTER_ALT_SCREEN, EXIT_ALT_SCREEN } from "./dashboard.js";
 import { buildBrief, buildArchitectBrief, buildImplementationBrief } from "./brief.js";
 import { git } from "./git.js";
@@ -310,23 +316,17 @@ async function main(): Promise<void> {
   // Startup cleanup
   cleanupStaleWorktrees(slug, args.verbose);
 
-  // Clean up artifacts from previous runs
-  const artDir = artifactsDir(args.projectPath);
-  if (fs.existsSync(artDir)) {
-    for (const f of fs.readdirSync(artDir)) {
-      if (f === ".gitignore") continue;
-      try { fs.unlinkSync(path.join(artDir, f)); } catch {}
-    }
-  }
-
   // Resume detection
   const previousProgress = readProgress(args.projectPath);
   const gitCompleted = detectCompletedFromGitLog(args.branch, filteredTasks, args.verbose);
 
   for (const t of filteredTasks) {
-    if (previousProgress.has(t.id) || gitCompleted.has(t.id)) {
+    const progressValue = previousProgress.get(t.id);
+    if (progressValue === "needs_human") {
+      t.status = "needs_human";
+    } else if (progressValue || gitCompleted.has(t.id)) {
       t.status = "done";
-      t.completedAt = previousProgress.get(t.id) || new Date().toISOString();
+      t.completedAt = progressValue || new Date().toISOString();
     }
   }
 
@@ -364,6 +364,177 @@ async function main(): Promise<void> {
       const title = task?.title ?? "QA Validation";
       console.log(`\x1b[1mT${taskId}: ${title}\x1b[0m`);
       console.log(report);
+    }
+  }
+
+  // ─── Triage helpers ──────────────────────────────────────────────────────
+
+  function classifyMergeError(error: unknown): { stage: FailureStage; errorClass?: ErrorClass } {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("Rebase conflicts")) return { stage: "merge_conflict", errorClass: "git_conflict" };
+    if (msg.includes("Test suite")) return { stage: "test_validation", errorClass: "test_failure" };
+    if (msg.includes("Type check")) return { stage: "build_validation", errorClass: "type_error" };
+    if (msg.includes("Build validation")) return { stage: "build_validation", errorClass: "build_failure" };
+    if (msg.includes("Dependency installation")) return { stage: "build_validation", errorClass: "install_failure" };
+    return { stage: "merge_conflict", errorClass: "unknown" };
+  }
+
+  async function invokeTriageForTask(
+    task: Task,
+    stage: FailureStage,
+    exitCode: number,
+    errorClass?: ErrorClass,
+  ): Promise<void> {
+    const context = await gatherDecisionContext(
+      task, filteredTasks, args.branch, args.projectPath, args.concurrency,
+      { stage, exitCode, errorClass },
+    );
+    const decision = await askTriage(context, args.projectPath, projectConfig);
+    writeDecisionRecord(task.id, {
+      timestamp: new Date().toISOString(),
+      attemptNumber: context.state.attemptCount + 1,
+      trigger: {
+        stage,
+        errorClass,
+        errorSummary: (context.trigger.errorTail || "").split("\n")[0].slice(0, 100),
+      },
+      decision,
+    }, args.projectPath);
+    await executeTriageAction(
+      task, decision, context, slug, args.branch, args.projectPath, filteredTasks, args.verbose,
+    );
+  }
+
+  function cleanupAfterTriage(task: Task): void {
+    switch (task.status) {
+      case "queued":
+        // Re-queued by triage (retry_from_scratch cleaned worktree+branch;
+        // resume_from_branch/reuse_plan keep worktree). Don't clean up.
+        break;
+      case "merging":
+        // retry_merge_only or mark_done — clean worktree, keep branch for merge
+        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: true });
+        break;
+      case "needs_human":
+        // escalate — clean worktree, keep branch for recovery
+        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: true });
+        break;
+      case "done":
+        // skip_and_continue — clean worktree and branch
+        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: false });
+        break;
+      case "failed":
+        // invokeTriageForTask threw — fall back to standard failure cleanup
+        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: true });
+        break;
+      // "running" (extend_timeout) — no cleanup, process still alive
+    }
+  }
+
+  // Map of pre-decided triage results from stall callbacks.
+  // When the stall callback kills a process, it stores the decision here.
+  // handleFinalClose checks this map to execute the decision without re-triaging.
+  const pendingStallDecisions = new Map<number, {
+    decision: TriageDecision;
+    context: DecisionContext;
+  }>();
+
+  async function handleStallCallback(task: Task): Promise<"keep" | "kill"> {
+    try {
+      const context = await gatherDecisionContext(
+        task, filteredTasks, args.branch, args.projectPath, args.concurrency,
+        { stage: "stall", exitCode: -1, errorClass: "stall" },
+      );
+      const decision = await askTriage(context, args.projectPath, projectConfig);
+      writeDecisionRecord(task.id, {
+        timestamp: new Date().toISOString(),
+        attemptNumber: context.state.attemptCount + 1,
+        trigger: {
+          stage: "stall",
+          errorClass: "stall",
+          errorSummary: task.lastLine || "Stall detected",
+        },
+        decision,
+      }, args.projectPath);
+
+      if (decision.action === "extend_timeout") {
+        await executeTriageAction(
+          task, decision, context, slug, args.branch, args.projectPath, filteredTasks, args.verbose,
+        );
+        return "keep";
+      }
+
+      // For all other actions, store decision for handleFinalClose
+      pendingStallDecisions.set(task.id, { decision, context });
+      return "kill";
+    } catch {
+      // Triage failed — fall back to kill, let handleFinalClose handle normally
+      return "kill";
+    }
+  }
+
+  // Startup validation: detect stale branches from previous runs and invoke triage
+  {
+    const existingBranches = new Set<string>();
+    try {
+      const branchList = git(["branch", "--list", `${args.branch}-t*`], { verbose: args.verbose });
+      for (const line of branchList.split("\n")) {
+        const name = line.trim().replace(/^\* /, "");
+        if (name) existingBranches.add(name);
+      }
+    } catch {}
+
+    for (const task of filteredTasks) {
+      if (task.status === "done" || task.status === "needs_human") continue;
+      const taskBranch = `${args.branch}-t${task.id}`;
+      if (!existingBranches.has(taskBranch)) continue;
+
+      // This task has a branch from a previous run but wasn't marked done
+      log(`Stale branch detected for T${task.id}, invoking triage for recovery assessment...`);
+      try {
+        const context = await gatherDecisionContext(
+          task, filteredTasks, args.branch, args.projectPath, args.concurrency,
+          { stage: "startup_validation", exitCode: -1 },
+        );
+        const decision = await askTriage(context, args.projectPath, projectConfig);
+        writeDecisionRecord(task.id, {
+          timestamp: new Date().toISOString(),
+          attemptNumber: context.state.attemptCount + 1,
+          trigger: {
+            stage: "startup_validation",
+            errorSummary: "Stale branch from previous run",
+          },
+          decision,
+        }, args.projectPath);
+        await executeTriageAction(
+          task, decision, context, slug, args.branch, args.projectPath, filteredTasks, args.verbose,
+        );
+
+        // Cleanup for terminal statuses only (cast needed: executeTriageAction may
+        // have changed status back to "needs_human" despite earlier narrowing)
+        const postTriageStatus = task.status as string;
+        if (postTriageStatus === "needs_human" || postTriageStatus === "merging") {
+          cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: true });
+        }
+      } catch (e) {
+        log(`Startup triage failed for T${task.id}: ${e instanceof Error ? e.message : String(e)}`);
+        // Don't block startup — let the task proceed normally
+      }
+    }
+    updateStatuses();
+  }
+
+  // Clean up per-run artifacts. Preserve durable triage files so that
+  // decision history and escalation notes survive across restarts.
+  {
+    const artDir = artifactsDir(args.projectPath);
+    if (fs.existsSync(artDir)) {
+      for (const f of fs.readdirSync(artDir)) {
+        if (f === ".gitignore") continue;
+        if (f.endsWith("-decisions.jsonl")) continue;
+        if (f.endsWith("-escalation.md")) continue;
+        try { fs.unlinkSync(path.join(artDir, f)); } catch {}
+      }
     }
   }
 
@@ -406,8 +577,13 @@ async function main(): Promise<void> {
 
     let wp: string;
     try {
-      wp = createWorktree(slug, task.id, args.branch, args.verbose);
-      task.worktreePath = wp;
+      if (task.worktreePath && fs.existsSync(task.worktreePath)) {
+        // Reuse existing worktree (set by resume_from_branch or reuse_plan)
+        wp = task.worktreePath;
+      } else {
+        wp = createWorktree(slug, task.id, args.branch, args.verbose);
+        task.worktreePath = wp;
+      }
     } catch (e: unknown) {
       task.status = "failed";
       task.stage = "";
@@ -420,6 +596,29 @@ async function main(): Promise<void> {
 
     // Shared close handler for the final phase (implementation or QA)
     const handleFinalClose = async (code: number | null, resolve: () => void) => {
+      // ── Check for pre-decided stall triage ──
+      const stallResult = pendingStallDecisions.get(task.id);
+      if (stallResult) {
+        pendingStallDecisions.delete(task.id);
+        await executeTriageAction(
+          task, stallResult.decision, stallResult.context,
+          slug, args.branch, args.projectPath, filteredTasks, args.verbose,
+        );
+        if (task.type === "qa") {
+          const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
+          if (fs.existsSync(qaReportPath)) {
+            qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
+          }
+        }
+        cleanupAfterTriage(task);
+        writeProgress(filteredTasks, args.projectPath);
+        updateStatuses();
+        activePromises.delete(task.id);
+        resolve();
+        return;
+      }
+
+      // ── Happy path: exit code 0 ──
       if (code === 0) {
         try {
           // Read memory entry from artifacts directory
@@ -460,15 +659,30 @@ async function main(): Promise<void> {
             task.stage = "";
             task.completedAt = new Date().toISOString();
           }
-        } catch (e: unknown) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = `[MERGE FAILED] ${(e instanceof Error ? e.message : String(e)).slice(0, 100)}`;
+        } catch (mergeErr) {
+          // Merge failed — invoke triage
+          try {
+            const mergeInfo = classifyMergeError(mergeErr);
+            await invokeTriageForTask(task, mergeInfo.stage, 0, mergeInfo.errorClass);
+          } catch (triageErr) {
+            // Triage itself failed — fall back to marking task failed
+            task.status = "failed";
+            task.stage = "";
+            task.lastLine = `[MERGE FAILED] ${(mergeErr instanceof Error ? mergeErr.message : String(mergeErr)).slice(0, 100)}`;
+            log(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+          }
         }
       } else {
-        task.status = "failed";
-        task.stage = "";
-        task.lastLine = task.lastLine || `[EXIT ${code}]`;
+        // ── Non-zero exit — invoke triage ──
+        try {
+          await invokeTriageForTask(task, "implementation", code ?? -1);
+        } catch (triageErr) {
+          // Triage itself failed — fall back to marking task failed
+          task.status = "failed";
+          task.stage = "";
+          task.lastLine = task.lastLine || `[EXIT ${code}]`;
+          log(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+        }
       }
 
       // Capture QA report from artifacts directory
@@ -479,12 +693,13 @@ async function main(): Promise<void> {
         }
       }
 
-      // Cleanup worktree — preserve task branch on merge failure for recovery
-      const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
-      cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
-      if (preserveBranch) {
-        log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
+      // Cleanup based on resulting status
+      if (task.status === "done") {
+        cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: false });
+      } else {
+        cleanupAfterTriage(task);
       }
+
       writeProgress(filteredTasks, args.projectPath);
       updateStatuses();
       activePromises.delete(task.id);
@@ -498,7 +713,7 @@ async function main(): Promise<void> {
       try {
         const brief = buildBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
         const qaEnv = getProviderEnv(args.models.qa.provider, args.ollama);
-        child = spawnAgent(task, brief, provider, args.models.qa.model, wp, args.projectPath, args.verbose, qaEnv);
+        child = spawnAgent(task, brief, provider, args.models.qa.model, wp, args.projectPath, args.verbose, qaEnv, handleStallCallback);
         task.process = child;
       } catch (e: unknown) {
         task.status = "failed";
@@ -524,7 +739,7 @@ async function main(): Promise<void> {
       try {
         const brief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
         const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
-        child = spawnAgent(task, brief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
+        child = spawnAgent(task, brief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv, handleStallCallback);
         task.process = child;
       } catch (e: unknown) {
         task.status = "failed";
@@ -543,13 +758,46 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Skip architect phase if flagged by triage (resume_from_branch, reuse_plan)
+    if (task.skipArchitect) {
+      task.skipArchitect = false; // One-shot: clear after use
+      task.provider = args.models.implementation.provider;
+      let implChild: ReturnType<typeof spawnAgent>;
+      try {
+        const implBrief = buildImplementationBrief(
+          task, filteredTasks, args.projectPath, designDoc, manifestContent,
+          args.branch, args.models, provider,
+        );
+        const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
+        implChild = spawnAgent(
+          task, implBrief, provider, args.models.implementation.model,
+          wp, args.projectPath, args.verbose, implEnv, handleStallCallback,
+        );
+        task.process = implChild;
+      } catch (e: unknown) {
+        task.status = "failed";
+        task.stage = "";
+        task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
+        cleanupWorktree(slug, task.id, args.branch, args.verbose);
+        writeProgress(filteredTasks, args.projectPath);
+        updateStatuses();
+        return;
+      }
+
+      const skipArchPromise = new Promise<void>((resolve) => {
+        implChild.on("close", (code) => handleFinalClose(code, resolve));
+      });
+      activePromises.set(task.id, skipArchPromise);
+      return;
+    }
+
     // Non-QA, higher-complexity tasks: two-phase architect → implementation
     task.provider = args.models.architect.provider;
     let architectChild: ReturnType<typeof spawnAgent>;
     try {
       const architectBrief = buildArchitectBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
       const architectEnv = getProviderEnv(args.models.architect.provider, args.ollama);
-      architectChild = spawnAgent(task, architectBrief, provider, args.models.architect.model, wp, args.projectPath, args.verbose, architectEnv);
+      architectChild = spawnAgent(task, architectBrief, provider, args.models.architect.model, wp, args.projectPath, args.verbose, architectEnv, handleStallCallback);
       task.process = architectChild;
     } catch (e: unknown) {
       task.status = "failed";
@@ -562,12 +810,34 @@ async function main(): Promise<void> {
     }
 
     const promise = new Promise<void>((resolve) => {
-      architectChild.on("close", (architectCode) => {
+      architectChild.on("close", async (architectCode) => {
+        // Check for pre-decided stall triage
+        const stallResult = pendingStallDecisions.get(task.id);
+        if (stallResult) {
+          pendingStallDecisions.delete(task.id);
+          await executeTriageAction(
+            task, stallResult.decision, stallResult.context,
+            slug, args.branch, args.projectPath, filteredTasks, args.verbose,
+          );
+          cleanupAfterTriage(task);
+          writeProgress(filteredTasks, args.projectPath);
+          updateStatuses();
+          activePromises.delete(task.id);
+          resolve();
+          return;
+        }
+
         if (architectCode !== 0) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = `[ARCHITECT EXIT ${architectCode}]`;
-          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          // Architect failed — invoke triage
+          try {
+            await invokeTriageForTask(task, "architect", architectCode ?? -1);
+          } catch (triageErr) {
+            task.status = "failed";
+            task.stage = "";
+            task.lastLine = `[ARCHITECT EXIT ${architectCode}]`;
+            log(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+          }
+          cleanupAfterTriage(task);
           writeProgress(filteredTasks, args.projectPath);
           updateStatuses();
           activePromises.delete(task.id);
@@ -578,10 +848,15 @@ async function main(): Promise<void> {
         // Verify plan was written
         const planPath = path.join(artifactsDir(args.projectPath), `t${task.id}-task-plan.md`);
         if (!fs.existsSync(planPath)) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = "[ARCHITECT] No task plan produced";
-          cleanupWorktree(slug, task.id, args.branch, args.verbose);
+          try {
+            await invokeTriageForTask(task, "plan_validation", 0, "missing_artifact");
+          } catch (triageErr) {
+            task.status = "failed";
+            task.stage = "";
+            task.lastLine = "[ARCHITECT] No task plan produced";
+            log(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+          }
+          cleanupAfterTriage(task);
           writeProgress(filteredTasks, args.projectPath);
           updateStatuses();
           activePromises.delete(task.id);
@@ -589,6 +864,7 @@ async function main(): Promise<void> {
           return;
         }
 
+        // ── Architect succeeded — proceed to implementation ──
         // Reset task state for phase 2 handoff
         task.stage = "";
         task.lastLine = "";
@@ -606,7 +882,7 @@ async function main(): Promise<void> {
         try {
           const implBrief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
           const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
-          const implChild = spawnAgent(task, implBrief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
+          const implChild = spawnAgent(task, implBrief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv, handleStallCallback);
           task.process = implChild; // Dashboard + stall detection now tracks implementation process
 
           implChild.on("close", (code) => handleFinalClose(code, resolve));
@@ -633,21 +909,76 @@ async function main(): Promise<void> {
     const runningTasks = filteredTasks.filter(t => t.status === "running");
     const queuedTasks = filteredTasks.filter(t => t.status === "queued");
     const blockedTasks = filteredTasks.filter(t => t.status === "blocked");
-    const doneTasks = filteredTasks.filter(t => t.status === "done");
-    const failedTasks = filteredTasks.filter(t => t.status === "failed");
 
-    // Check completion
+    // Handle tasks in "merging" state (set by retry_merge_only or mark_done)
+    const mergingTasks = filteredTasks.filter(
+      t => t.status === "merging" && !activePromises.has(t.id),
+    );
+    for (const task of mergingTasks) {
+      const mergePromise = (async () => {
+        try {
+          task.stage = "Merging";
+
+          const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
+          let memBody = "";
+          if (fs.existsSync(memEntryPath)) {
+            memBody = fs.readFileSync(memEntryPath, "utf-8");
+          }
+
+          await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
+
+          if (memBody) {
+            await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
+          }
+
+          task.status = "done";
+          task.stage = "";
+          task.completedAt = new Date().toISOString();
+          // Clean up task branch (worktree already gone)
+          cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch: false });
+        } catch (mergeErr) {
+          // Merge failed again — invoke triage
+          task.stage = ""; // Clear stale "Merging" stage before triage changes status
+          try {
+            const mergeInfo = classifyMergeError(mergeErr);
+            await invokeTriageForTask(task, mergeInfo.stage, 1, mergeInfo.errorClass);
+          } catch (triageErr) {
+            task.status = "failed";
+            task.lastLine = `[MERGE FAILED] ${(mergeErr instanceof Error ? mergeErr.message : String(mergeErr)).slice(0, 100)}`;
+            log(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
+          }
+          cleanupAfterTriage(task);
+        }
+
+        writeProgress(filteredTasks, args.projectPath);
+        updateStatuses();
+        activePromises.delete(task.id);
+      })();
+
+      activePromises.set(task.id, mergePromise);
+    }
+
+    // Check completion — nothing running, queued, or in-flight
     if (runningTasks.length === 0 && queuedTasks.length === 0) {
+      // Wait for in-flight merge/triage promises before exiting
+      if (activePromises.size > 0) {
+        await Promise.race(activePromises.values());
+        continue; // Re-check statuses after promise completes
+      }
+
       if (blockedTasks.length > 0) {
         log("\x1b[31mStuck: blocked tasks remain but nothing is running or queued.\x1b[0m");
         const taskById = new Map(filteredTasks.map(t => [t.id, t]));
         for (const t of blockedTasks) {
-          const missingDeps = t.dependsOn.filter(d => {
+          const failedDeps = t.dependsOn.filter(d => {
             const dep = taskById.get(d);
-            return dep && dep.status === "failed";
+            return dep && (dep.status === "failed" || dep.status === "needs_human");
           });
-          if (missingDeps.length > 0) {
-            log(`  T${t.id} blocked by failed: ${missingDeps.map(d => `T${d}`).join(", ")}`);
+          if (failedDeps.length > 0) {
+            log(`  T${t.id} blocked by: ${failedDeps.map(d => {
+              const dep = taskById.get(d);
+              return `T${d} (${dep?.status})`;
+            }).join(", ")}`);
           }
         }
       }
@@ -687,14 +1018,25 @@ async function main(): Promise<void> {
 
   const done = filteredTasks.filter(t => t.status === "done").length;
   const failed = filteredTasks.filter(t => t.status === "failed").length;
+  const needsHumanCount = filteredTasks.filter(t => t.status === "needs_human").length;
 
   if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   console.log("");
   console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
 
-  if (failed > 0) {
-    console.log(`  \x1b[32m${done} done\x1b[0m, \x1b[31m${failed} failed\x1b[0m of ${filteredTasks.length} tasks`);
-    console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
+  if (failed > 0 || needsHumanCount > 0) {
+    let summary = `  \x1b[32m${done} done\x1b[0m`;
+    if (failed > 0) summary += `, \x1b[31m${failed} failed\x1b[0m`;
+    if (needsHumanCount > 0) summary += `, \x1b[33m${needsHumanCount} needs human\x1b[0m`;
+    summary += ` of ${filteredTasks.length} tasks`;
+    console.log(summary);
+
+    if (failed > 0) {
+      console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
+    }
+    if (needsHumanCount > 0) {
+      console.log(`  ${needsHumanCount} task(s) need human intervention — see artifacts/t<N>-escalation.md`);
+    }
     printQAReports();
     process.exit(1);
   }

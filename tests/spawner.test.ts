@@ -469,6 +469,105 @@ describe("spawnAgent stall detection", () => {
 
     expect(child.kill).not.toHaveBeenCalled();
   });
+
+  // ── 17. onStall callback: kill when callback returns "kill" ───────────
+
+  it("calls onStall callback and kills when callback returns 'kill'", async () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+    const onStall = vi.fn(async () => "kill" as const);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false, undefined, onStall);
+
+    // Receive some bytes then stall
+    child.stdout!.emit("data", Buffer.from("some output"));
+
+    // Advance past mid-task stall timeout (5 min + check interval)
+    vi.advanceTimersByTime(5 * 60 * 1000 + 15 * 1000);
+    await Promise.resolve(); // flush async callback
+
+    expect(onStall).toHaveBeenCalledWith(task);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(task.lastLine).toContain("[STALL]");
+
+    child.emit("close");
+  });
+
+  // ── 18. onStall callback: keep when callback returns "keep" ───────────
+
+  it("does not kill when onStall returns 'keep'", async () => {
+    const task = makeTask({ id: 2 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+    const onStall = vi.fn(async () => "keep" as const);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false, undefined, onStall);
+
+    child.stdout!.emit("data", Buffer.from("some output"));
+
+    vi.advanceTimersByTime(5 * 60 * 1000 + 15 * 1000);
+    await Promise.resolve();
+
+    expect(onStall).toHaveBeenCalledWith(task);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    child.emit("close");
+  });
+
+  // ── 19. onStall callback: kill on callback error (fallback) ────────────
+
+  it("falls back to kill when onStall throws", async () => {
+    const task = makeTask({ id: 3 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+    const onStall = vi.fn(async () => { throw new Error("triage failed"); });
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false, undefined, onStall);
+
+    child.stdout!.emit("data", Buffer.from("some output"));
+
+    vi.advanceTimersByTime(5 * 60 * 1000 + 15 * 1000);
+    await Promise.resolve();
+
+    expect(onStall).toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(task.lastLine).toContain("[STALL]");
+
+    child.emit("close");
+  });
+
+  // ── 20. onStall callback: prevents re-entry ───────────────────────────
+
+  it("prevents re-entry while stall callback is in progress", async () => {
+    const task = makeTask({ id: 4 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    // Slow callback — won't resolve until we manually flush
+    let resolveStall!: (v: "keep" | "kill") => void;
+    const onStall = vi.fn(() => new Promise<"keep" | "kill">(r => { resolveStall = r; }));
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false, undefined, onStall);
+
+    child.stdout!.emit("data", Buffer.from("some output"));
+
+    // First stall check fires
+    vi.advanceTimersByTime(5 * 60 * 1000 + 15 * 1000);
+    await Promise.resolve();
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    // Advance another check interval — should NOT call again (flag still set)
+    vi.advanceTimersByTime(15 * 1000);
+    await Promise.resolve();
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    // Resolve callback and clean up
+    resolveStall("kill");
+    await Promise.resolve();
+
+    child.emit("close");
+  });
 });
 
 // ─── Output ring buffer tests ───────────────────────────────────────────────

@@ -59,6 +59,7 @@ export function spawnAgent(
   projectDir: string,
   verbose: boolean,
   env?: Record<string, string>,
+  onStall?: (task: Task) => Promise<"keep" | "kill">,
 ): ChildProcess {
   // Write brief to artifacts directory (outside worktree, for debugging only)
   const briefPath = path.join(artifactsDir(projectDir), `t${task.id}-brief.md`);
@@ -141,16 +142,41 @@ export function spawnAgent(
   });
 
   // Stall detection
-  const stallInterval = setInterval(() => {
+  let stallCallbackInProgress = false;
+  const stallInterval = setInterval(async () => {
+    if (stallCallbackInProgress) return;
     const ss = stallStates.get(task.id);
     if (!ss) return;
     if (checkIsStalled(ss, task.bytesReceived)) {
-      if (task.bytesReceived === 0) {
-        task.lastLine = "[STALL] No output received - startup timeout (2 min)";
+      if (onStall) {
+        stallCallbackInProgress = true;
+        try {
+          const result = await onStall(task);
+          if (result === "kill") {
+            task.lastLine = task.bytesReceived === 0
+              ? "[STALL] No output received - startup timeout (2 min)"
+              : "[STALL] No new output - mid-task timeout (5 min)";
+            child.kill("SIGTERM");
+          }
+          // If "keep": callback already extended timeout via extendStallTimeout.
+          // Stall interval continues — next check sees fresh lastBytesTime.
+        } catch {
+          // Callback failed — fallback to original kill behavior
+          task.lastLine = task.bytesReceived === 0
+            ? "[STALL] No output received - startup timeout (2 min)"
+            : "[STALL] No new output - mid-task timeout (5 min)";
+          child.kill("SIGTERM");
+        } finally {
+          stallCallbackInProgress = false;
+        }
       } else {
-        task.lastLine = "[STALL] No new output - mid-task timeout (5 min)";
+        if (task.bytesReceived === 0) {
+          task.lastLine = "[STALL] No output received - startup timeout (2 min)";
+        } else {
+          task.lastLine = "[STALL] No new output - mid-task timeout (5 min)";
+        }
+        child.kill("SIGTERM");
       }
-      child.kill("SIGTERM");
     }
   }, STALL_CHECK_INTERVAL_MS);
 

@@ -47,13 +47,6 @@ function gitCalls(): string[][] {
     .map((c) => c[1] as string[]);
 }
 
-/** Returns all npm calls as [command, args] tuples. */
-function npmCalls(): [string, string[]][] {
-  return mockExec.mock.calls
-    .filter((c) => c[0] === "npm")
-    .map((c) => [c[0] as string, c[1] as string[]]);
-}
-
 // ─── Setup ───────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -271,10 +264,10 @@ describe("squashMerge — serialization", () => {
   });
 });
 
-// ─── Conflict: package.json auto-resolve ─────────────────────────────────────
+// ─── Conflict: package.json now goes through rebase-retry ────────────────────
 
-describe("squashMerge — package.json conflict resolution", () => {
-  it("auto-resolves package.json conflicts with checkout --theirs and npm install", async () => {
+describe("squashMerge — package.json conflict triggers rebase-retry", () => {
+  it("package.json conflicts go through rebase-retry (no auto-resolve)", async () => {
     let mergeAttempt = 0;
 
     mockExec.mockImplementation((cmd, args) => {
@@ -286,12 +279,8 @@ describe("squashMerge — package.json conflict resolution", () => {
         }
         return "";
       }
-      if (
-        cmd === "git" &&
-        a[0] === "diff" &&
-        a.includes("--diff-filter=U")
-      ) {
-        return "package.json\npackage-lock.json";
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
+        throw new Error("fatal: There is no merge to abort (MERGE_HEAD missing)");
       }
       return "";
     });
@@ -300,15 +289,38 @@ describe("squashMerge — package.json conflict resolution", () => {
 
     const calls = gitCalls();
 
-    expect(calls).toContainEqual(["checkout", "--theirs", "package.json"]);
-    expect(calls).toContainEqual([
-      "checkout",
-      "--theirs",
-      "package-lock.json",
-    ]);
+    // Should NOT auto-resolve with checkout --theirs
+    expect(calls).not.toContainEqual(["checkout", "--theirs", "package.json"]);
+    expect(calls).not.toContainEqual(["checkout", "--theirs", "package-lock.json"]);
 
-    expect(npmCalls().some(([cmd, a]) => a[0] === "install")).toBe(true);
-    expect(calls).toContainEqual(["add", "package-lock.json"]);
+    // Should go through rebase-retry path
+    expect(calls).toContainEqual(["reset", "--hard", "HEAD"]);
+    expect(calls).toContainEqual(["checkout", "feat/x-t4"]);
+    expect(calls).toContainEqual(["reset", "--soft", "feat/x"]);
+    expect(calls).toContainEqual(["rebase", "feat/x"]);
+  });
+
+  it("does not call npm install for package.json conflicts", async () => {
+    let mergeAttempt = 0;
+
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--squash") {
+        mergeAttempt++;
+        if (mergeAttempt === 1) throw new Error("merge conflict");
+        return "";
+      }
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
+        throw new Error("fatal: There is no merge to abort");
+      }
+      return "";
+    });
+
+    await squashMerge(4, "proj", "feat/x", "fix: deps", false);
+
+    // No npm calls should have been made
+    const npmCalls = mockExec.mock.calls.filter(c => c[0] === "npm");
+    expect(npmCalls).toHaveLength(0);
   });
 });
 
