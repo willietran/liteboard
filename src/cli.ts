@@ -16,7 +16,6 @@ import {
   cleanupWorktree,
   cleanupAllWorktrees,
   cleanupStaleWorktrees,
-  getWorktreePath,
 } from "./worktree.js";
 import { squashMerge } from "./merger.js";
 import { spawnAgent } from "./spawner.js";

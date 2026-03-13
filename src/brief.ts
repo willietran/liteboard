@@ -310,7 +310,7 @@ export function buildArchitectBrief(
 
 export function buildImplementationBrief(
   task: Task,
-  allTasks: Task[],
+  _allTasks: Task[],
   projectDir: string,
   designDoc: string,
   manifest: string,

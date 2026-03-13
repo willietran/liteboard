@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ChildProcess } from "node:child_process";
-import type { Task, Provider, StreamEvent, TaskStage } from "./types.js";
+import type { Task, Provider, TaskStage } from "./types.js";
 import { VALID_STAGE_MARKERS } from "./types.js";
 import { artifactsDir } from "./paths.js";
 

@@ -45,7 +45,7 @@ function commitViaFile(taskId: number, message: string, verbose: boolean): void 
 
 export async function squashMerge(
   taskId: number,
-  slug: string,
+  _slug: string,
   featureBranch: string,
   commitMessage: string,
   verbose: boolean,
