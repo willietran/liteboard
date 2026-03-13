@@ -18,6 +18,38 @@ const STALL_TIMEOUT_MS = 5 * 60 * 1000;
  *  negligible while detecting stalls within one check window of the timeout. */
 const STALL_CHECK_INTERVAL_MS = 15 * 1000;
 
+/** Maximum number of lines retained per task in the output ring buffer. */
+const RING_BUFFER_SIZE = 30;
+
+interface StallState {
+  lastBytesTime: number;
+  customTimeoutMs?: number;
+}
+
+/** Per-task output ring buffer. Cleaned up on process close. */
+const outputBuffers = new Map<number, string[]>();
+
+/** Per-task stall tracking state. Cleaned up on process close. */
+const stallStates = new Map<number, StallState>();
+
+/** Returns true if the task's process is considered stalled given current time. */
+function checkIsStalled(ss: StallState, bytesReceived: number): boolean {
+  const elapsed = Date.now() - ss.lastBytesTime;
+  const midTaskTimeout = ss.customTimeoutMs ?? STALL_TIMEOUT_MS;
+  return (
+    (bytesReceived === 0 && elapsed > STARTUP_TIMEOUT_MS) ||
+    (bytesReceived > 0 && elapsed > midTaskTimeout)
+  );
+}
+
+/** Appends a line to the ring buffer, trimming to RING_BUFFER_SIZE. */
+function appendToBuffer(buf: string[], line: string): void {
+  buf.push(line);
+  if (buf.length > RING_BUFFER_SIZE) {
+    buf.splice(0, buf.length - RING_BUFFER_SIZE);
+  }
+}
+
 export function spawnAgent(
   task: Task,
   brief: string,
@@ -45,13 +77,23 @@ export function spawnAgent(
   // Create per-agent stream parser to avoid buffer corruption at concurrency > 1
   const parse = provider.createStreamParser();
 
-  let lastBytesTime = Date.now();
+  // Initialize module-level state for this task
+  stallStates.set(task.id, { lastBytesTime: Date.now() });
+  outputBuffers.set(task.id, []);
 
   // Parse stdout
   child.stdout?.on("data", (chunk: Buffer) => {
     task.bytesReceived += chunk.length;
-    lastBytesTime = Date.now();
+    const ss = stallStates.get(task.id);
+    if (ss) ss.lastBytesTime = Date.now();
     logStream.write(chunk);
+
+    // Populate output ring buffer
+    const buf = outputBuffers.get(task.id);
+    if (buf) {
+      const lines = chunk.toString().split("\n").filter(Boolean);
+      for (const line of lines) appendToBuffer(buf, line);
+    }
 
     const events = parse(chunk);
     for (const evt of events) {
@@ -84,25 +126,64 @@ export function spawnAgent(
   // Capture stderr
   child.stderr?.on("data", (chunk: Buffer) => {
     const msg = chunk.toString().trim();
-    if (msg) logStream.write(`[stderr] ${msg}\n`);
+    if (msg) {
+      logStream.write(`[stderr] ${msg}\n`);
+      const buf = outputBuffers.get(task.id);
+      if (buf) appendToBuffer(buf, `[stderr] ${msg}`);
+    }
   });
 
   child.on("close", () => {
     logStream.end();
     clearInterval(stallInterval);
+    outputBuffers.delete(task.id);
+    stallStates.delete(task.id);
   });
 
   // Stall detection
   const stallInterval = setInterval(() => {
-    const elapsed = Date.now() - lastBytesTime;
-    if (task.bytesReceived === 0 && elapsed > STARTUP_TIMEOUT_MS) {
-      task.lastLine = "[STALL] No output received - startup timeout (2 min)";
-      child.kill("SIGTERM");
-    } else if (task.bytesReceived > 0 && elapsed > STALL_TIMEOUT_MS) {
-      task.lastLine = "[STALL] No new output - mid-task timeout (5 min)";
+    const ss = stallStates.get(task.id);
+    if (!ss) return;
+    if (checkIsStalled(ss, task.bytesReceived)) {
+      if (task.bytesReceived === 0) {
+        task.lastLine = "[STALL] No output received - startup timeout (2 min)";
+      } else {
+        task.lastLine = "[STALL] No new output - mid-task timeout (5 min)";
+      }
       child.kill("SIGTERM");
     }
   }, STALL_CHECK_INTERVAL_MS);
 
   return child;
+}
+
+/** Returns a snapshot of the last ≤30 lines of stdout/stderr output for a task. */
+export function getRecentOutput(task: Task): string[] {
+  const buf = outputBuffers.get(task.id);
+  return buf ? [...buf] : [];
+}
+
+/** Returns stall detection state for a task. */
+export function getStallInfo(task: Task): {
+  bytesReceived: number;
+  lastActivityMs: number;
+  isStalled: boolean;
+} {
+  const ss = stallStates.get(task.id);
+  if (!ss) {
+    return { bytesReceived: 0, lastActivityMs: 0, isStalled: false };
+  }
+  return {
+    bytesReceived: task.bytesReceived,
+    lastActivityMs: ss.lastBytesTime,
+    isStalled: checkIsStalled(ss, task.bytesReceived),
+  };
+}
+
+/** Resets the stall timer and optionally sets a custom timeout duration. */
+export function extendStallTimeout(task: Task, durationMs: number): void {
+  const ss = stallStates.get(task.id);
+  if (!ss) return;
+  ss.lastBytesTime = Date.now();
+  ss.customTimeoutMs = durationMs;
 }

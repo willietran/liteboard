@@ -16,7 +16,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import * as fs from "node:fs";
-import { spawnAgent } from "../src/spawner.js";
+import { spawnAgent, getRecentOutput, getStallInfo, extendStallTimeout } from "../src/spawner.js";
 
 const mockWriteFileSync = vi.mocked(fs.writeFileSync);
 const mockExistsSync = vi.mocked(fs.existsSync);
@@ -32,6 +32,7 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
     modifies: [],
     dependsOn: [],
     requirements: [],
+    explore: [],
     tddPhase: "GREEN",
     commitMessage: "",
     complexity: 1,
@@ -467,5 +468,232 @@ describe("spawnAgent stall detection", () => {
     vi.advanceTimersByTime(10 * 60 * 1000);
 
     expect(child.kill).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Output ring buffer tests ───────────────────────────────────────────────
+
+describe("output ring buffer", () => {
+  it("getRecentOutput returns empty array for unknown task", () => {
+    const result = getRecentOutput(makeTask({ id: 999 }));
+    expect(result).toEqual([]);
+  });
+
+  it("ring buffer stores stdout lines", () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("line1\nline2\nline3\n"));
+
+    expect(getRecentOutput(task)).toEqual(["line1", "line2", "line3"]);
+
+    child.emit("close");
+  });
+
+  it("ring buffer stores stderr lines with [stderr] prefix", () => {
+    const task = makeTask({ id: 2 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stderr!.emit("data", Buffer.from("error msg\n"));
+
+    expect(getRecentOutput(task)).toEqual(["[stderr] error msg"]);
+
+    child.emit("close");
+  });
+
+  it("ring buffer rotates at 30 lines", () => {
+    const task = makeTask({ id: 3 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+
+    // Emit 35 lines
+    const lines = Array.from({ length: 35 }, (_, i) => `line${i + 1}`).join("\n") + "\n";
+    child.stdout!.emit("data", Buffer.from(lines));
+
+    const result = getRecentOutput(task);
+    expect(result).toHaveLength(30);
+    expect(result[0]).toBe("line6");
+    expect(result[29]).toBe("line35");
+
+    child.emit("close");
+  });
+
+  it("ring buffer is cleaned up on process close", () => {
+    const task = makeTask({ id: 4 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("some output\n"));
+    child.emit("close");
+
+    expect(getRecentOutput(task)).toEqual([]);
+  });
+});
+
+// ─── Stall info exposure tests ──────────────────────────────────────────────
+
+describe("stall info exposure", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("getStallInfo returns defaults for unknown task", () => {
+    const info = getStallInfo(makeTask({ id: 999 }));
+    expect(info).toEqual({ bytesReceived: 0, lastActivityMs: 0, isStalled: false });
+  });
+
+  it("getStallInfo returns not-stalled state for active process", () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("hello"));
+
+    const info = getStallInfo(task);
+    expect(info.isStalled).toBe(false);
+    expect(info.bytesReceived).toBe(5);
+    expect(info.lastActivityMs).toBeGreaterThanOrEqual(0);
+
+    child.emit("close");
+  });
+
+  it("getStallInfo returns isStalled true after startup timeout with zero bytes", () => {
+    const task = makeTask({ id: 2 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+
+    // Advance past 2 min startup timeout
+    vi.advanceTimersByTime(2 * 60 * 1000 + 1);
+
+    const info = getStallInfo(task);
+    expect(info.isStalled).toBe(true);
+    expect(info.bytesReceived).toBe(0);
+
+    child.emit("close");
+  });
+
+  it("getStallInfo returns isStalled true after mid-task stall", () => {
+    const task = makeTask({ id: 3 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("some output"));
+
+    // Advance past 5 min mid-task stall timeout
+    vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+
+    const info = getStallInfo(task);
+    expect(info.isStalled).toBe(true);
+    expect(info.bytesReceived).toBeGreaterThan(0);
+
+    child.emit("close");
+  });
+
+  it("getStallInfo returns defaults after process close", () => {
+    const task = makeTask({ id: 10 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("some data"));
+    child.emit("close");
+
+    expect(getStallInfo(task)).toEqual({ bytesReceived: 0, lastActivityMs: 0, isStalled: false });
+  });
+});
+
+// ─── extendStallTimeout tests ───────────────────────────────────────────────
+
+describe("extendStallTimeout", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("extendStallTimeout is a no-op for unknown task", () => {
+    const unknownTask = makeTask({ id: 999 });
+    expect(() => extendStallTimeout(unknownTask, 600000)).not.toThrow();
+    expect(getStallInfo(unknownTask)).toEqual({ bytesReceived: 0, lastActivityMs: 0, isStalled: false });
+  });
+
+  it("extendStallTimeout resets the stall timer", () => {
+    const task = makeTask({ id: 1 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("data"));
+
+    // Advance to 4:45 — within the 5 min timeout, no kill yet
+    vi.advanceTimersByTime(5 * 60 * 1000 - 15 * 1000);
+
+    // Reset the stall timer (same 5 min duration)
+    extendStallTimeout(task, 5 * 60 * 1000);
+
+    // Advance 30s more: 5:00 total from start, but only 0:30 since extend — NOT killed
+    vi.advanceTimersByTime(30 * 1000);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    // Advance another 5:00 to be > 5 min since extend
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+
+    child.emit("close");
+  });
+
+  it("extendStallTimeout with custom duration extends timeout beyond default", () => {
+    const task = makeTask({ id: 2 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("data"));
+
+    // Set a 15 min custom timeout immediately
+    extendStallTimeout(task, 15 * 60 * 1000);
+
+    // Advance 6 min (past default 5 min) — should NOT kill
+    vi.advanceTimersByTime(6 * 60 * 1000);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    // Advance past 15 min from extend (15 min + 15s for next check)
+    vi.advanceTimersByTime(9 * 60 * 1000 + 15 * 1000);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+
+    child.emit("close");
+  });
+
+  it("getStallInfo reflects extended timeout — not stalled at 6 min after extend", () => {
+    const task = makeTask({ id: 5 });
+    const child = makeMockChild();
+    const provider = makeMockProvider(child);
+
+    spawnAgent(task, "brief", provider, "sonnet", "/tmp/wp", "/proj", false);
+    child.stdout!.emit("data", Buffer.from("data"));
+    extendStallTimeout(task, 15 * 60 * 1000);
+
+    // Advance 6 min (past default 5 min timeout but within custom 15 min)
+    vi.advanceTimersByTime(6 * 60 * 1000);
+    expect(getStallInfo(task).isStalled).toBe(false);
+
+    child.emit("close");
   });
 });
