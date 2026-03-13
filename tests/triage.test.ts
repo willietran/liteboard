@@ -5,6 +5,7 @@ import type { Task, DecisionContext, DecisionRecord, FailureStage, ActionDescrip
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(() => Buffer.from("")),
+  execFile: vi.fn(),
 }));
 
 vi.mock("node:fs", () => ({
@@ -39,15 +40,19 @@ vi.mock("../src/paths.js", () => ({
 
 vi.mock("../src/spawner.js", () => ({
   getRecentOutput: vi.fn(() => []),
+  extendStallTimeout: vi.fn(),
 }));
 
 vi.mock("../src/worktree.js", () => ({
   getWorktreePath: (slug: string, taskId: number) => `/tmp/liteboard-${slug}-t${taskId}`,
+  cleanupWorktree: vi.fn(),
+  recreateWorktreeFromBranch: vi.fn(() => "/tmp/worktree-path"),
 }));
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
 import * as fs from "node:fs";
-import { getRecentOutput } from "../src/spawner.js";
+import { getRecentOutput, extendStallTimeout } from "../src/spawner.js";
+import { cleanupWorktree, recreateWorktreeFromBranch } from "../src/worktree.js";
 import {
   parseTriageResponse,
   isActionLegal,
@@ -57,15 +62,23 @@ import {
   logTriageResponse,
   buildTriagePrompt,
   gatherDecisionContext,
+  askTriage,
+  executeTriageAction,
+  MAX_TRIAGE_ATTEMPTS,
 } from "../src/triage.js";
+import type { ProjectConfig, SimpleAgentConfig } from "../src/types.js";
 
 const mockExec = vi.mocked(execFileSync);
+const mockExecFile = vi.mocked(execFile);
 const mockExistsSync = vi.mocked(fs.existsSync);
 const mockReadFileSync = vi.mocked(fs.readFileSync);
 const mockAppendFileSync = vi.mocked(fs.appendFileSync);
 const mockWriteFileSync = vi.mocked(fs.writeFileSync);
 const mockMkdirSync = vi.mocked(fs.mkdirSync);
 const mockGetRecentOutput = vi.mocked(getRecentOutput);
+const mockCleanupWorktree = vi.mocked(cleanupWorktree);
+const mockRecreateWorktree = vi.mocked(recreateWorktreeFromBranch);
+const mockExtendStallTimeout = vi.mocked(extendStallTimeout);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -780,5 +793,300 @@ describe("gatherDecisionContext", () => {
 
     const ctx = await gatherDecisionContext(task, [task], "feature/main", "/proj", 4, trigger);
     expect(ctx.state.commitsAhead).toBe(0); // fallback to 0, no throw
+  });
+});
+
+// ─── askTriage ───────────────────────────────────────────────────────────────
+
+function makeConfig(triage?: SimpleAgentConfig): ProjectConfig {
+  return {
+    agents: {
+      architect: {
+        provider: "claude",
+        model: "claude-opus-4-6",
+        subagents: {
+          explore: { model: "claude-sonnet-4-6" },
+          planReview: { model: "claude-opus-4-6" },
+        },
+      },
+      implementation: {
+        provider: "claude",
+        model: "claude-opus-4-6",
+        subagents: { codeReview: { model: "claude-sonnet-4-6" } },
+      },
+      qa: {
+        provider: "claude",
+        model: "claude-opus-4-6",
+        subagents: { qaFixer: { model: "claude-opus-4-6" } },
+      },
+    },
+    concurrency: 4,
+    triage,
+  };
+}
+
+/** Helper to make execFile call a callback with (null, stdout) */
+function mockExecFileSuccess(stdout: string): void {
+  mockExecFile.mockImplementationOnce((_cmd, _args, _opts, callback) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (callback as any)(null, stdout, "");
+    return undefined as any;
+  });
+}
+
+describe("askTriage", () => {
+  it("returns valid decision when claude -p succeeds", async () => {
+    const ctx = makeContext();
+    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "test" }));
+
+    const decision = await askTriage(ctx, "/proj", makeConfig());
+    expect(decision.action).toBe("retry_from_scratch");
+    expect(decision.reasoning).toBe("test");
+  });
+
+  it("returns escalate on spawn/timeout failure", async () => {
+    const ctx = makeContext();
+    mockExecFile.mockImplementationOnce((_cmd, _args, _opts, callback) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (callback as any)(new Error("spawn failed"), "", "");
+      return undefined as any;
+    });
+
+    const decision = await askTriage(ctx, "/proj", makeConfig());
+    expect(decision.action).toBe("escalate");
+    expect(decision.reasoning).toContain("spawn failed");
+  });
+
+  it("returns escalate when response is unparseable", async () => {
+    const ctx = makeContext();
+    mockExecFileSuccess("not json at all");
+
+    const decision = await askTriage(ctx, "/proj", makeConfig());
+    expect(decision.action).toBe("escalate");
+  });
+
+  it("returns escalate when chosen action is illegal", async () => {
+    // resume_from_branch requires branchExists && commitsAhead > 0
+    const ctx = makeContext({ state: { branchExists: false, commitsAhead: 0, diffStat: "", worktreeExists: false, worktreeClean: false, planExists: false, attemptCount: 0, runningTasks: 0, freeSlots: 4 } });
+    mockExecFileSuccess(JSON.stringify({ action: "resume_from_branch", reasoning: "try to resume" }));
+
+    const decision = await askTriage(ctx, "/proj", makeConfig());
+    expect(decision.action).toBe("escalate");
+    expect(decision.reasoning).toContain("illegal action");
+  });
+
+  it("enforces MAX_TRIAGE_ATTEMPTS — returns escalate without spawning", async () => {
+    const ctx = makeContext({ state: { branchExists: true, commitsAhead: 1, diffStat: "", worktreeExists: true, worktreeClean: true, planExists: true, attemptCount: MAX_TRIAGE_ATTEMPTS, runningTasks: 0, freeSlots: 4 } });
+
+    const decision = await askTriage(ctx, "/proj", makeConfig());
+    expect(decision.action).toBe("escalate");
+    expect(decision.reasoning).toContain("Max triage attempts");
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it("calls logTriageResponse with raw stdout", async () => {
+    const ctx = makeContext();
+    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+
+    await askTriage(ctx, "/proj", makeConfig());
+    expect(mockAppendFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("triage-response.log"),
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("uses config.triage.model when provided", async () => {
+    const ctx = makeContext();
+    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+
+    await askTriage(ctx, "/proj", makeConfig({ provider: "claude", model: "claude-opus-4-6" }));
+
+    const args = mockExecFile.mock.calls[0][1] as string[];
+    const modelIdx = args.indexOf("--model");
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(args[modelIdx + 1]).toBe("claude-opus-4-6");
+  });
+
+  it("defaults to claude-sonnet-4-6 when no triage config", async () => {
+    const ctx = makeContext();
+    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+
+    await askTriage(ctx, "/proj", makeConfig(undefined));
+
+    const args = mockExecFile.mock.calls[0][1] as string[];
+    const modelIdx = args.indexOf("--model");
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(args[modelIdx + 1]).toBe("claude-sonnet-4-6");
+  });
+});
+
+// ─── executeTriageAction ─────────────────────────────────────────────────────
+
+describe("executeTriageAction", () => {
+  const slug = "myproject";
+  const featureBranch = "liteboard/triage-agent";
+  const projectDir = "/proj";
+  const verbose = false;
+
+  it("retry_from_scratch: calls cleanupWorktree and resets task state", async () => {
+    const task = makeTask({ id: 3, status: "failed", stage: "Implementation", turnCount: 5, bytesReceived: 100 });
+    const decision = { action: "retry_from_scratch" as const, reasoning: "start over" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(slug, task.id, featureBranch, verbose, { preserveBranch: false });
+    expect(task.status).toBe("queued");
+    expect(task.stage).toBe("");
+    expect(task.lastLine).toBe("");
+    expect(task.turnCount).toBe(0);
+    expect(task.bytesReceived).toBe(0);
+    expect(task.attemptCount).toBe(1);
+  });
+
+  it("retry_from_scratch: increments existing attemptCount", async () => {
+    const task = makeTask({ id: 3, status: "failed", attemptCount: 2 });
+    const decision = { action: "retry_from_scratch" as const, reasoning: "start over" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task.attemptCount).toBe(3);
+  });
+
+  it("resume_from_branch: recreates worktree when missing, sets skipArchitect", async () => {
+    const task = makeTask({ id: 3, status: "failed" });
+    mockExistsSync.mockReturnValue(false); // worktree doesn't exist
+    const decision = { action: "resume_from_branch" as const, reasoning: "branch has work" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(mockRecreateWorktree).toHaveBeenCalledWith(slug, task.id, featureBranch, verbose);
+    expect(task.worktreePath).toBe("/tmp/worktree-path");
+    expect(task.status).toBe("queued");
+    expect(task.skipArchitect).toBe(true);
+  });
+
+  it("resume_from_branch: skips worktree recreation when worktree exists, normalizes worktreePath", async () => {
+    const wtPath = "/tmp/existing-worktree";
+    const task = makeTask({ id: 3, status: "failed", worktreePath: wtPath });
+    mockExistsSync.mockImplementation((p) => String(p) === wtPath);
+    const decision = { action: "resume_from_branch" as const, reasoning: "resume" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(mockRecreateWorktree).not.toHaveBeenCalled();
+    expect(task.worktreePath).toBe(wtPath);
+    expect(task.status).toBe("queued");
+    expect(task.skipArchitect).toBe(true);
+  });
+
+  it("retry_merge_only: sets merging status", async () => {
+    const task = makeTask({ id: 3, status: "failed" });
+    const decision = { action: "retry_merge_only" as const, reasoning: "try merge" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task.status).toBe("merging");
+  });
+
+  it("skip_and_continue: marks done with skip reason", async () => {
+    const task = makeTask({ id: 3, status: "failed" });
+    const decision = { action: "skip_and_continue" as const, reasoning: "Non-critical task" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task.status).toBe("done");
+    expect(task.lastLine).toBe("[SKIPPED] Non-critical task");
+  });
+
+  it("skip_and_continue: logs warning when blocked downstream tasks exist", async () => {
+    const task = makeTask({ id: 3, status: "failed" });
+    const dep1 = makeTask({ id: 10, dependsOn: [3] });
+    const dep2 = makeTask({ id: 11, dependsOn: [3] });
+    const decision = { action: "skip_and_continue" as const, reasoning: "skip" };
+    const ctx = makeContext();
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [task, dep1, dep2], verbose);
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("2"));
+    warnSpy.mockRestore();
+  });
+
+  it("escalate: writes escalation file and sets needs_human", async () => {
+    const task = makeTask({ id: 3, status: "failed" });
+    const decision = { action: "escalate" as const, reasoning: "cannot recover" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task.status).toBe("needs_human");
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("escalation.md"),
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("reuse_plan: sets queued with skipArchitect", async () => {
+    const task = makeTask({ id: 3, status: "failed", stage: "architect" });
+    const decision = { action: "reuse_plan" as const, reasoning: "plan exists" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task.status).toBe("queued");
+    expect(task.skipArchitect).toBe(true);
+    expect(task.stage).toBe("");
+  });
+
+  it("extend_timeout: calls extendStallTimeout with parsed duration", async () => {
+    const task = makeTask({ id: 3, status: "running" });
+    const decision = { action: "extend_timeout" as const, reasoning: "give more time", details: { timeoutMs: "300000" } };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(mockExtendStallTimeout).toHaveBeenCalledWith(task, 300000);
+    expect(task.status).toBe("running"); // no status mutation
+  });
+
+  it("extend_timeout: uses default 600000ms when no timeoutMs in details", async () => {
+    const task = makeTask({ id: 3, status: "running" });
+    const decision = { action: "extend_timeout" as const, reasoning: "more time" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(mockExtendStallTimeout).toHaveBeenCalledWith(task, 600000);
+    expect(task.status).toBe("running");
+  });
+
+  it("extend_timeout: falls back to 600000ms when timeoutMs is non-numeric", async () => {
+    const task = makeTask({ id: 3, status: "running" });
+    const decision = { action: "extend_timeout" as const, reasoning: "more time", details: { timeoutMs: "soon" } };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(mockExtendStallTimeout).toHaveBeenCalledWith(task, 600_000);
+    expect(task.status).toBe("running");
+  });
+
+  it("mark_done: sets merging status", async () => {
+    const task = makeTask({ id: 3, status: "failed" });
+    const decision = { action: "mark_done" as const, reasoning: "work is done" };
+    const ctx = makeContext();
+
+    await executeTriageAction(task, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task.status).toBe("merging");
   });
 });

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFile } from "node:child_process";
 import * as path from "node:path";
 import type {
   Task,
@@ -9,13 +10,17 @@ import type {
   ActionDescription,
   FailureStage,
   ErrorClass,
+  ProjectConfig,
 } from "./types.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
-import { getRecentOutput } from "./spawner.js";
-import { getWorktreePath } from "./worktree.js";
+import { getRecentOutput, extendStallTimeout } from "./spawner.js";
+import { getWorktreePath, cleanupWorktree, recreateWorktreeFromBranch } from "./worktree.js";
+import { createMutex } from "./mutex.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+
+export const MAX_TRIAGE_ATTEMPTS = 3;
 
 const VALID_ACTIONS: ReadonlySet<string> = new Set<TriageAction>([
   "retry_from_scratch",
@@ -70,6 +75,9 @@ const ACTION_DESCRIPTIONS: ActionDescription[] = [
     legalWhen: "Branch exists with commits ahead of feature branch",
   },
 ];
+
+// Only one triage invocation at a time — concurrent failures queue instead of racing.
+const serializeTriage = createMutex();
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
@@ -444,4 +452,162 @@ export async function gatherDecisionContext(
     history,
     actions: ACTION_DESCRIPTIONS,
   };
+}
+
+// ─── spawnTriageAgent ─────────────────────────────────────────────────────────
+
+/** Spawn short-lived `claude -p` for triage. Returns stdout. */
+function spawnTriageAgent(prompt: string, model: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    execFile(
+      "claude",
+      ["-p", prompt, "--model", model, "--output-format", "text", "--max-turns", "1"],
+      {
+        timeout: 30_000,
+        encoding: "utf-8",
+        env: { ...process.env, CLAUDE_CODE_MAX_TURNS: "1" },
+      },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+// ─── askTriage ────────────────────────────────────────────────────────────────
+
+export async function askTriage(
+  context: DecisionContext,
+  projectDir: string,
+  config: ProjectConfig,
+): Promise<TriageDecision> {
+  // Check max attempts before entering mutex — fail fast without queuing
+  if (context.state.attemptCount >= MAX_TRIAGE_ATTEMPTS) {
+    return {
+      action: "escalate",
+      reasoning: `Max triage attempts (${MAX_TRIAGE_ATTEMPTS}) exceeded. Escalating to human.`,
+    };
+  }
+
+  return serializeTriage(async () => {
+    const prompt = buildTriagePrompt(context);
+    const model = config.triage?.model ?? "claude-sonnet-4-6";
+
+    try {
+      const stdout = await spawnTriageAgent(prompt, model);
+      logTriageResponse(context.task.id, stdout, projectDir);
+      const decision = parseTriageResponse(stdout);
+
+      if (!isActionLegal(decision.action, context.state, context.trigger.stage)) {
+        return {
+          action: "escalate" as const,
+          reasoning: `Triage chose illegal action: ${decision.action}`,
+        };
+      }
+
+      return decision;
+    } catch (error) {
+      return {
+        action: "escalate" as const,
+        reasoning: `Triage agent failed: ${(error as Error).message}`,
+      };
+    }
+  });
+}
+
+// ─── executeTriageAction ──────────────────────────────────────────────────────
+
+/** Reset task fields for re-entry into the scheduling pipeline. */
+function resetTaskForRetry(task: Task): void {
+  task.stage = "";
+  task.lastLine = "";
+  task.turnCount = 0;
+  task.bytesReceived = 0;
+}
+
+export async function executeTriageAction(
+  task: Task,
+  decision: TriageDecision,
+  context: DecisionContext,
+  slug: string,
+  featureBranch: string,
+  projectDir: string,
+  allTasks: Task[],
+  verbose: boolean,
+): Promise<void> {
+  switch (decision.action) {
+    case "retry_from_scratch":
+      // Full restart: clean worktree+branch and re-queue from scratch.
+      // attemptCount tracks full restarts (not resume/reuse which preserve work).
+      cleanupWorktree(slug, task.id, featureBranch, verbose, { preserveBranch: false });
+      task.status = "queued";
+      resetTaskForRetry(task);
+      task.attemptCount = (task.attemptCount ?? 0) + 1;
+      break;
+
+    case "resume_from_branch": {
+      // Preserve existing branch and commits. Re-attach worktree if cleaned up.
+      const wtPath = task.worktreePath ?? getWorktreePath(slug, task.id);
+      if (!existsSync(wtPath)) {
+        task.worktreePath = recreateWorktreeFromBranch(slug, task.id, featureBranch, verbose);
+      } else {
+        // Normalize task.worktreePath so downstream code always has the path set.
+        task.worktreePath = wtPath;
+      }
+      task.status = "queued";
+      task.skipArchitect = true;
+      resetTaskForRetry(task);
+      break;
+    }
+
+    case "retry_merge_only":
+      // Keep branch/commits, re-attempt merge only. Main loop detects "merging" state.
+      task.status = "merging";
+      break;
+
+    case "skip_and_continue": {
+      task.status = "done";
+      task.lastLine = `[SKIPPED] ${decision.reasoning}`;
+      const blockedCount = allTasks.filter((t) => t.dependsOn.includes(task.id)).length;
+      if (blockedCount > 0) {
+        console.warn(
+          `[triage] Task ${task.id} skipped with ${blockedCount} downstream dependent(s) blocked`,
+        );
+      }
+      break;
+    }
+
+    case "escalate":
+      writeEscalation(task, decision, context, projectDir);
+      task.status = "needs_human";
+      break;
+
+    case "reuse_plan":
+      // Keep existing plan, skip architect, go straight to implementation.
+      task.status = "queued";
+      task.skipArchitect = true;
+      resetTaskForRetry(task);
+      break;
+
+    case "extend_timeout": {
+      const parsed = parseInt(decision.details?.timeoutMs ?? "600000", 10);
+      // Guard against NaN (LLM could return a non-numeric string) to prevent
+      // silently disabling stall detection with an invalid timeout.
+      const durationMs = Number.isFinite(parsed) ? parsed : 600_000;
+      extendStallTimeout(task, durationMs);
+      // No status change — task remains running with extended timeout.
+      break;
+    }
+
+    case "mark_done":
+      // Attempt squash merge of existing branch. Main loop detects "merging" state.
+      task.status = "merging";
+      break;
+
+    default: {
+      const _exhaustive: never = decision.action;
+      break;
+    }
+  }
 }
