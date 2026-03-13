@@ -127,21 +127,6 @@ Liteboard is a **thin orchestration layer** — it manages tasks, dependencies, 
 
 **The litmus test:** If a new feature requires a new orchestrator module, new CLI flags, new dashboard renderer, or new marker protocol — stop. It probably belongs in a brief (`commands/*.md`) and a task type, not in TypeScript. The orchestrator should be **feature-agnostic**: it spawns agents, tracks progress, and merges results. The agents are smart enough to handle the rest.
 
-### Agent Tool Restrictions
-
-Only agents that **build and test code** (implementation agents, QA agents) may use the Bash tool. All other agents have structural tool restrictions via their agent definitions (`agents/` directory).
-
-| Agent Role | Definition | Bash | Why |
-|------------|-----------|------|-----|
-| Implementation agent | Top-level (`claude -p`) | Yes | Runs tests, builds, installs deps |
-| QA agent | Top-level (`claude -p`) | Yes | Runs the application, validates behavior |
-| Architect agent | Top-level (`claude -p`) | No | Plans only (prompt-level restriction) |
-| Explore subagent | `agents/code-explorer.md` | No | Reads code and docs only |
-| Plan reviewer | `agents/plan-reviewer.md` | No | Reviews plan text only |
-| Code reviewer | `agents/code-reviewer.md` | No | Reviews diffs and existing files only |
-
-`node_modules` is gitignored and absent in worktrees. Runtime API verification (`node -e`, `python3 -c`) always fails — use documentation tools instead.
-
 ---
 
 ## Non-Negotiable Standards
