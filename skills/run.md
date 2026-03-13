@@ -23,7 +23,7 @@ Launch the orchestrator via the Bash tool with `run_in_background: true`:
 liteboard run <project-path> --concurrency=<N> --verbose
 ```
 
-Default concurrency is 1. Ask the user if they want to increase it (max 5).
+Default concurrency is 1. Ask the user if they want to increase it.
 
 ## Step 3: Supervisor Loop
 
