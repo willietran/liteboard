@@ -8,3 +8,5 @@ logs/
 *.tmp
 
 .qa-report.md
+
+.brief-s*.md

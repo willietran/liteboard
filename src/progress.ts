@@ -62,7 +62,6 @@ export function readProgress(projectDir: string): {
 
   // Detect format: new format has "## Sessions" header, old format does not
   const hasSessionsHeader = lines.some((l) => l.trim() === "## Sessions");
-  const hasTasksHeader = lines.some((l) => l.trim() === "## Tasks");
 
   if (!hasSessionsHeader) {
     // Backward compat: old format — parse entire content as tasks table

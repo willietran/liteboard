@@ -1120,6 +1120,30 @@ describe("executeTriageAction", () => {
     expect(session.lastLine).toBe("[SKIPPED] Non-critical session");
   });
 
+  it("skip_and_continue: marks constituent tasks as done to unblock downstream", async () => {
+    const task1 = makeTask({ id: 1, status: "running" });
+    const task2 = makeTask({ id: 2, status: "blocked" });
+    const session = makeSession({ id: "s1", status: "failed", tasks: [task1, task2] });
+    const decision = { action: "skip_and_continue" as const, reasoning: "Non-critical" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task1.status).toBe("done");
+    expect(task2.status).toBe("done");
+  });
+
+  it("skip_and_continue: does not overwrite already-done constituent tasks", async () => {
+    const task1 = makeTask({ id: 1, status: "done" });
+    const session = makeSession({ id: "s1", status: "failed", tasks: [task1] });
+    const decision = { action: "skip_and_continue" as const, reasoning: "skip" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(task1.status).toBe("done");
+  });
+
   it("skip_and_continue: logs warning when blocked downstream sessions exist", async () => {
     const task3 = makeTask({ id: 3 });
     const session = makeSession({ id: "s3", status: "failed", tasks: [task3] });

@@ -357,7 +357,7 @@ export async function gatherDecisionContext(
   trigger: { stage: FailureStage; exitCode: number; errorClass?: ErrorClass },
 ): Promise<DecisionContext> {
   const slug = path.basename(projectDir);
-  const sessionBranch = `${featureBranch}-s${session.id}`;
+  const sessionBranch = session.branchName ?? `${featureBranch}-s${session.id}`;
   const wtPath = session.worktreePath ?? getWorktreePath(slug, session.id);
 
   // ── Branch state ──────────────────────────────────────────────────────────
@@ -591,6 +591,10 @@ export async function executeTriageAction(
     case "skip_and_continue": {
       session.status = "done";
       session.lastLine = `[SKIPPED] ${decision.reasoning}`;
+      // Mark constituent tasks done so task-level dep checks unblock downstream tasks
+      for (const t of session.tasks) {
+        if (t.status !== "done") t.status = "done";
+      }
       const sessionTaskIds = new Set(session.tasks.map((t) => t.id));
       const blockedCount = allSessions.filter((s) =>
         s !== session && s.tasks.some((t) => t.dependsOn.some((dep) => sessionTaskIds.has(dep))),

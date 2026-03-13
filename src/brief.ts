@@ -413,6 +413,7 @@ function buildQABrief(
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
+  artifactPrefix?: string,
 ): string {
   const slug = path.basename(projectDir);
   const parts: string[] = [];
@@ -490,8 +491,9 @@ function buildQABrief(
   parts.push("- Do NOT touch files unrelated to this task");
   parts.push("- Do NOT push to remote");
   const artDir = artifactsDir(projectDir);
-  parts.push(`- If you made code fixes, write memory entry to \`${artDir}/t${task.id}-memory-entry.md\` summarizing what you fixed`);
-  parts.push(`- **Always** write QA report to \`${artDir}/t${task.id}-qa-report.md\` with a markdown table of all tests and results`);
+  const prefix = artifactPrefix ?? `t${task.id}`;
+  parts.push(`- If you made code fixes, write memory entry to \`${artDir}/${prefix}-memory-entry.md\` summarizing what you fixed`);
+  parts.push(`- **Always** write QA report to \`${artDir}/${prefix}-qa-report.md\` with a markdown table of all tests and results`);
   parts.push(`- Save any generated artifacts (screenshots, reports) to \`${artDir}/\` — never to the repo root`);
   parts.push("- Use standard `[STAGE: ...]` markers as described in the workflow above");
   parts.push("");
@@ -728,8 +730,8 @@ function buildSessionQABrief(
   models?: ModelConfig,
   provider?: Provider,
 ): string {
-  // QA sessions always have exactly 1 task by design — delegate to existing logic
-  return buildQABrief(session.tasks[0], allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
+  // QA sessions typically have 1 task — delegate with session-scoped artifact prefix
+  return buildQABrief(session.tasks[0], allTasks, projectDir, designDoc, manifest, featureBranch, models, provider, `s${session.id}`);
 }
 
 export function buildSessionBrief(

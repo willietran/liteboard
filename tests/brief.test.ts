@@ -1393,6 +1393,15 @@ describe("buildSessionBrief dispatcher", () => {
     expect(brief).toContain("# QA Agent");
   });
 
+  it("uses session-scoped qa-report path (not task-scoped) for QA sessions", () => {
+    const task = makeTask({ id: 9, title: "Validate integration", type: "qa" });
+    const session = makeSession({ id: "3", tasks: [task], focus: "Final QA" });
+    const brief = buildSessionBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/s3-qa-report.md");
+    expect(brief).not.toContain("/fake/project/artifacts/t9-qa-report.md");
+  });
+
   it("dispatches to implementation brief when session has mixed task types", () => {
     const implTask = makeTask({ id: 1, title: "Implement feature" });
     const qaTask = makeTask({ id: 2, title: "QA feature", type: "qa" });
