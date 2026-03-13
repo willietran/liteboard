@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const skillsSource = path.resolve(__dirname, "..", "skills");
+const agentsSource = path.resolve(__dirname, "..", "agents");
 
 function die(msg: string): never {
   console.error(`\x1b[31mError:\x1b[0m ${msg}`);
@@ -64,6 +65,23 @@ export function runSetup(): void {
     const dest = path.join(commandsDir, destName);
     fs.copyFileSync(src, dest);
     console.log(`  Installed: /liteboard:${name}`);
+  }
+
+  // Copy agent files as liteboard: prefixed agents
+  if (fs.existsSync(agentsSource)) {
+    const agentsDestDir = path.join(claudeDir, "agents");
+    if (!fs.existsSync(agentsDestDir)) {
+      fs.mkdirSync(agentsDestDir, { recursive: true });
+    }
+    const agentFiles = fs.readdirSync(agentsSource).filter(f => f.endsWith(".md"));
+    for (const file of agentFiles) {
+      const name = file.replace(".md", "");
+      const destName = `liteboard:${name}.md`;
+      const src = path.join(agentsSource, file);
+      const dest = path.join(agentsDestDir, destName);
+      fs.copyFileSync(src, dest);
+      console.log(`  Installed agent: liteboard:${name}`);
+    }
   }
 
   console.log(`\n\x1b[32mSetup complete!\x1b[0m ${skillFiles.length} skills installed.\n`);

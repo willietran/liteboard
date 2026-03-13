@@ -110,31 +110,34 @@ describe("runSetup", () => {
 
     // which claude succeeds
     mockExec.mockReturnValue(Buffer.from("/usr/local/bin/claude"));
-    // existsSync: ~/.claude exists, skills source exists, commands dir exists
+    // existsSync: ~/.claude exists, skills source exists, commands dir exists,
+    //             agents source exists, agents dest dir exists
     mockExistsSync.mockReturnValue(true);
-    // readdirSync returns skill files
-    mockReaddirSync.mockReturnValue(
-      ["brainstorm.md", "task-manifest.md", "run.md"] as unknown as ReturnType<typeof fs.readdirSync>,
-    );
+    // readdirSync: first call returns skills, second call returns agents
+    mockReaddirSync
+      .mockReturnValueOnce(
+        ["brainstorm.md", "task-manifest.md", "run.md"] as unknown as ReturnType<typeof fs.readdirSync>,
+      )
+      .mockReturnValueOnce(
+        ["code-explorer.md", "plan-reviewer.md", "code-reviewer.md"] as unknown as ReturnType<typeof fs.readdirSync>,
+      );
 
     runSetup();
 
-    // Should copy each skill file with liteboard: prefix
-    expect(mockCopyFileSync).toHaveBeenCalledTimes(3);
+    // Should copy 3 skill files + 3 agent files
+    expect(mockCopyFileSync).toHaveBeenCalledTimes(6);
 
-    // Verify the destination paths include liteboard: prefix
-    const destPaths = mockCopyFileSync.mock.calls.map(
-      (call) => call[1] as string,
-    );
-    expect(destPaths).toContainEqual(
-      expect.stringContaining("liteboard:brainstorm.md"),
-    );
-    expect(destPaths).toContainEqual(
-      expect.stringContaining("liteboard:task-manifest.md"),
-    );
-    expect(destPaths).toContainEqual(
-      expect.stringContaining("liteboard:run.md"),
-    );
+    const destPaths = mockCopyFileSync.mock.calls.map((call) => call[1] as string);
+
+    // Skills installed to commands/
+    expect(destPaths).toContainEqual(expect.stringContaining("liteboard:brainstorm.md"));
+    expect(destPaths).toContainEqual(expect.stringContaining("liteboard:task-manifest.md"));
+    expect(destPaths).toContainEqual(expect.stringContaining("liteboard:run.md"));
+
+    // Agents installed to agents/
+    expect(destPaths).toContainEqual(expect.stringContaining("liteboard:code-explorer.md"));
+    expect(destPaths).toContainEqual(expect.stringContaining("liteboard:plan-reviewer.md"));
+    expect(destPaths).toContainEqual(expect.stringContaining("liteboard:code-reviewer.md"));
 
     process.env.HOME = originalHome;
   });
@@ -145,16 +148,19 @@ describe("runSetup", () => {
 
     // which claude succeeds
     mockExec.mockReturnValue(Buffer.from("/usr/local/bin/claude"));
-    // existsSync: ~/.claude exists (1st call), skills source exists (2nd),
-    // commands dir does NOT exist (3rd)
+    // existsSync: ~/.claude exists (1st), skills source exists (2nd),
+    // commands dir does NOT exist (3rd), agents source exists (4th),
+    // agents dest dir exists (5th)
     mockExistsSync
       .mockReturnValueOnce(true)   // ~/.claude
       .mockReturnValueOnce(true)   // skills source
-      .mockReturnValueOnce(false); // commands dir
-    // readdirSync returns skill files
-    mockReaddirSync.mockReturnValue(
-      ["brainstorm.md"] as unknown as ReturnType<typeof fs.readdirSync>,
-    );
+      .mockReturnValueOnce(false)  // commands dir (missing — triggers mkdir)
+      .mockReturnValueOnce(true)   // agents source
+      .mockReturnValueOnce(true);  // agents dest dir
+    // readdirSync: skills, then agents (empty)
+    mockReaddirSync
+      .mockReturnValueOnce(["brainstorm.md"] as unknown as ReturnType<typeof fs.readdirSync>)
+      .mockReturnValueOnce([] as unknown as ReturnType<typeof fs.readdirSync>);
 
     runSetup();
 
@@ -162,6 +168,57 @@ describe("runSetup", () => {
       "/Users/testuser/.claude/commands",
       { recursive: true },
     );
+
+    process.env.HOME = originalHome;
+  });
+
+  it("creates agents directory if it does not exist", () => {
+    const originalHome = process.env.HOME;
+    process.env.HOME = "/Users/testuser";
+
+    mockExec.mockReturnValue(Buffer.from("/usr/local/bin/claude"));
+    // existsSync: ~/.claude (1st), skills source (2nd), commands dir (3rd),
+    // agents source (4th), agents dest dir does NOT exist (5th)
+    mockExistsSync
+      .mockReturnValueOnce(true)   // ~/.claude
+      .mockReturnValueOnce(true)   // skills source
+      .mockReturnValueOnce(true)   // commands dir
+      .mockReturnValueOnce(true)   // agents source
+      .mockReturnValueOnce(false); // agents dest dir (missing — triggers mkdir)
+    mockReaddirSync
+      .mockReturnValueOnce(["brainstorm.md"] as unknown as ReturnType<typeof fs.readdirSync>)
+      .mockReturnValueOnce(["code-explorer.md"] as unknown as ReturnType<typeof fs.readdirSync>);
+
+    runSetup();
+
+    expect(mockMkdirSync).toHaveBeenCalledWith(
+      "/Users/testuser/.claude/agents",
+      { recursive: true },
+    );
+
+    process.env.HOME = originalHome;
+  });
+
+  it("skips agent installation when agents source directory does not exist", () => {
+    const originalHome = process.env.HOME;
+    process.env.HOME = "/Users/testuser";
+
+    mockExec.mockReturnValue(Buffer.from("/usr/local/bin/claude"));
+    // existsSync: ~/.claude (1st), skills source (2nd), commands dir (3rd),
+    // agents source does NOT exist (4th)
+    mockExistsSync
+      .mockReturnValueOnce(true)   // ~/.claude
+      .mockReturnValueOnce(true)   // skills source
+      .mockReturnValueOnce(true)   // commands dir
+      .mockReturnValueOnce(false); // agents source (missing — skip agents)
+    mockReaddirSync.mockReturnValueOnce(
+      ["brainstorm.md"] as unknown as ReturnType<typeof fs.readdirSync>,
+    );
+
+    runSetup();
+
+    // Only 1 skill file copied — no agent files
+    expect(mockCopyFileSync).toHaveBeenCalledTimes(1);
 
     process.env.HOME = originalHome;
   });

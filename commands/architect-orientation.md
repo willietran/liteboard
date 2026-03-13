@@ -14,10 +14,14 @@ Every task moves through these phases in order. Do not skip or reorder them.
 `[STAGE: Exploring]`, `[STAGE: Planning]`, `[STAGE: Plan Review]`
 These markers are parsed by the orchestrator dashboard. Do not skip them.
 
+## Tool Restrictions
+
+You are a planning-only agent. Do NOT use the Bash tool — your job is to explore and plan, not execute code. If you need to verify a library API, use documentation tools (WebSearch, or reading type definition files) — never `node -e` or `python3 -c`. `node_modules` is absent in worktrees.
+
 ## Spawning Subagents
 
-- **Explore subagent**: Use the Agent tool with `subagent_type="Explore"` and the model from the Sub-Agent Models section (Explore).
-- **Plan Review subagent**: Use the Agent tool with the model from the Sub-Agent Models section (Plan Review).
+- **Explore subagent**: Use the Agent tool with `subagent_type="liteboard:code-explorer"` and the model from the Sub-Agent Models section (Explore).
+- **Plan Review subagent**: Use the Agent tool with `subagent_type="liteboard:plan-reviewer"` and the model from the Sub-Agent Models section (Plan Review).
 
 ## Planning Discipline
 

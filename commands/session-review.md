@@ -9,7 +9,7 @@ Spawn an independent review subagent to evaluate the implementation diff before 
    - The approved implementation plan
    - Any relevant context (design doc, task description)
 
-2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Code Review). Instruct the reviewer: review by reading the diff and existing files only — do not scaffold projects or install packages. Send it the diff, the plan, and the evaluation criteria from `commands/code-reviewer.md`. Ask the reviewer to assess:
+2. Spawn a review subagent using the Agent tool with `subagent_type="liteboard:code-reviewer"` and the model from the Sub-Agent Models section (Code Review). Send it the diff, the plan, and the evaluation criteria from `commands/code-reviewer.md`. Ask the reviewer to assess:
    - Does the implementation match the approved plan?
    - Are there deviations from the plan, and if so, are they justified?
 
