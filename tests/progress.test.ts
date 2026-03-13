@@ -193,7 +193,7 @@ describe("readProgress — pipe character roundtrip", () => {
     const result = readProgress("/fake/project");
 
     expect(result.size).toBe(1);
-    expect(result.get(1)).toBe("2026-03-10T12:00:00Z");
+    expect(result.get(1)).toEqual({ status: "done", completedAt: "2026-03-10T12:00:00Z" });
   });
 });
 
@@ -220,8 +220,8 @@ describe("readProgress", () => {
 
     expect(result).toBeInstanceOf(Map);
     expect(result.size).toBe(2);
-    expect(result.get(1)).toBe("2026-03-10T12:00:00Z");
-    expect(result.get(2)).toBe("2026-03-10T13:00:00Z");
+    expect(result.get(1)).toEqual({ status: "done", completedAt: "2026-03-10T12:00:00Z" });
+    expect(result.get(2)).toEqual({ status: "done", completedAt: "2026-03-10T13:00:00Z" });
     expect(result.has(3)).toBe(false);
   });
 
@@ -304,8 +304,7 @@ describe("readProgress — needs_human and merging resume behavior", () => {
     const result = readProgress("/fake/project");
 
     expect(result.has(5)).toBe(true);
-    // Sentinel value — T8 resume logic checks: if value === "needs_human", restore as needs_human not done
-    expect(result.get(5)).toBe("needs_human");
+    expect(result.get(5)).toEqual({ status: "needs_human" });
   });
 });
 

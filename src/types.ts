@@ -304,6 +304,12 @@ export interface BuildValidationResult {
   testPassCount: number;
 }
 
+// ─── Progress Entry ───────────────────────────────────────────────────────
+
+export type ProgressEntry =
+  | { status: "done"; completedAt: string }
+  | { status: "needs_human" };
+
 // ─── Dependency Layer ─────────────────────────────────────────────────────
 
 export interface Layer {

@@ -74,7 +74,7 @@ describe("squashMerge — trial merge succeeds", () => {
       return "";
     });
 
-    await squashMerge(1, "proj", "feat/x", "chore: test", false);
+    await squashMerge(1, "feat/x", "chore: test", false);
 
     expect(mockRunBuildValidation).toHaveBeenCalledWith(
       "/repo/root",
@@ -83,7 +83,7 @@ describe("squashMerge — trial merge succeeds", () => {
   });
 
   it("commits with the correct message after successful merge", async () => {
-    await squashMerge(3, "proj", "feat/x", "feat: add widget", false);
+    await squashMerge(3, "feat/x", "feat: add widget", false);
 
     expect(gitCalls()).toContainEqual(["checkout", "feat/x"]);
     expect(gitCalls()).toContainEqual([
@@ -97,7 +97,7 @@ describe("squashMerge — trial merge succeeds", () => {
   });
 
   it("removes ephemeral files (including .qa-report.md) from staging before commit", async () => {
-    await squashMerge(5, "proj", "feat/x", "fix: stuff", false);
+    await squashMerge(5, "feat/x", "fix: stuff", false);
 
     expect(gitCalls()).toContainEqual(
       expect.arrayContaining([
@@ -119,7 +119,7 @@ describe("squashMerge — trial merge succeeds", () => {
   });
 
   it("deletes ephemeral files from disk after unstaging", async () => {
-    await squashMerge(5, "proj", "feat/x", "fix: stuff", false);
+    await squashMerge(5, "feat/x", "fix: stuff", false);
 
     const unlinkCalls = vi.mocked(fs.unlinkSync).mock.calls.map(c => c[0]);
     expect(unlinkCalls).toContain(".memory-entry.md");
@@ -128,7 +128,7 @@ describe("squashMerge — trial merge succeeds", () => {
   });
 
   it("stages lockfile after build validation", async () => {
-    await squashMerge(9, "proj", "feat/x", "chore: lock", false);
+    await squashMerge(9, "feat/x", "chore: lock", false);
 
     // Should stage package-lock.json
     expect(gitCalls()).toContainEqual(["add", "package-lock.json"]);
@@ -150,7 +150,7 @@ describe("squashMerge — build validation failure", () => {
     });
 
     await expect(
-      squashMerge(2, "proj", "feat/x", "feat: bad", false),
+      squashMerge(2, "feat/x", "feat: bad", false),
     ).rejects.toThrow(/Build validation.*fail/);
 
     expect(gitCalls().find((c) => c[0] === "commit")).toBeUndefined();
@@ -168,7 +168,7 @@ describe("squashMerge — build validation failure", () => {
     });
 
     await expect(
-      squashMerge(10, "proj", "feat/x", "feat: bad-types", false),
+      squashMerge(10, "feat/x", "feat: bad-types", false),
     ).rejects.toThrow(/Type check.*fail/);
 
     expect(gitCalls().find((c) => c[0] === "commit")).toBeUndefined();
@@ -186,7 +186,7 @@ describe("squashMerge — build validation failure", () => {
     });
 
     await expect(
-      squashMerge(11, "proj", "feat/x", "feat: bad-tests", false),
+      squashMerge(11, "feat/x", "feat: bad-tests", false),
     ).rejects.toThrow(/Test suite.*fail/);
 
     expect(gitCalls().find((c) => c[0] === "commit")).toBeUndefined();
@@ -204,7 +204,7 @@ describe("squashMerge — build validation failure", () => {
     });
 
     await expect(
-      squashMerge(8, "proj", "feat/x", "feat: bad-deps", false),
+      squashMerge(8, "feat/x", "feat: bad-deps", false),
     ).rejects.toThrow(/Dependency installation.*fail/);
 
     expect(gitCalls().find((c) => c[0] === "commit")).toBeUndefined();
@@ -255,8 +255,8 @@ describe("squashMerge — serialization", () => {
       return "";
     });
 
-    const p1 = squashMerge(1, "proj", "feat/x", "first", false);
-    const p2 = squashMerge(2, "proj", "feat/x", "second", false);
+    const p1 = squashMerge(1, "feat/x", "first", false);
+    const p2 = squashMerge(2, "feat/x", "second", false);
 
     await Promise.all([p1, p2]);
 
@@ -285,7 +285,7 @@ describe("squashMerge — package.json conflict triggers rebase-retry", () => {
       return "";
     });
 
-    await squashMerge(4, "proj", "feat/x", "fix: deps", false);
+    await squashMerge(4, "feat/x", "fix: deps", false);
 
     const calls = gitCalls();
 
@@ -316,7 +316,7 @@ describe("squashMerge — package.json conflict triggers rebase-retry", () => {
       return "";
     });
 
-    await squashMerge(4, "proj", "feat/x", "fix: deps", false);
+    await squashMerge(4, "feat/x", "fix: deps", false);
 
     // No npm calls should have been made
     const npmCalls = mockExec.mock.calls.filter(c => c[0] === "npm");
@@ -330,7 +330,7 @@ describe("squashMerge — no package.json", () => {
   it("skips lockfile staging when no package.json", async () => {
     mockExistsSync.mockReturnValue(false);
 
-    await squashMerge(7, "proj", "feat/x", "chore: no-npm", false);
+    await squashMerge(7, "feat/x", "chore: no-npm", false);
 
     // runBuildValidation should have been called (it handles the no-pkg case internally)
     expect(mockRunBuildValidation).toHaveBeenCalled();
@@ -369,7 +369,7 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
       return "";
     });
 
-    await squashMerge(6, "proj", "feat/x", "feat: widget", false);
+    await squashMerge(6, "feat/x", "feat: widget", false);
 
     const calls = gitCalls();
 
@@ -417,7 +417,7 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
       return "";
     });
 
-    await squashMerge(7, "proj", "feat/x", "fix: config", false);
+    await squashMerge(7, "feat/x", "fix: config", false);
 
     const calls = gitCalls();
 
@@ -454,7 +454,7 @@ describe("squashMerge — dirty index guard", () => {
       return "";
     });
 
-    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+    await squashMerge(1, "feat/x", "feat: test", false);
 
     const calls = gitCalls();
 
@@ -486,7 +486,7 @@ describe("squashMerge — dirty index guard", () => {
     });
 
     // Should still succeed — the catch {} in the guard silences the error
-    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+    await squashMerge(1, "feat/x", "feat: test", false);
 
     const calls = gitCalls();
     expect(calls).toContainEqual(["commit", "-F", "/tmp/commit-msg-1.txt"]);
@@ -501,7 +501,7 @@ describe("squashMerge — dirty index guard", () => {
       return "";
     });
 
-    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+    await squashMerge(1, "feat/x", "feat: test", false);
 
     const calls = gitCalls();
 
@@ -524,7 +524,7 @@ describe("squashMerge — dirty index guard", () => {
 
 describe("squashMerge — no git clean -fd in main repo", () => {
   it("does not call git clean -fd (would nuke untracked project files)", async () => {
-    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+    await squashMerge(1, "feat/x", "feat: test", false);
 
     const calls = gitCalls();
     const cleanCalls = calls.filter(c => c[0] === "clean" && c[1] === "-fd");
@@ -542,7 +542,7 @@ describe("squashMerge — no git clean -fd in main repo", () => {
       testPassCount: 0,
     });
 
-    await expect(squashMerge(2, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
+    await expect(squashMerge(2, "feat/x", "feat: bad", false)).rejects.toThrow();
 
     const calls = gitCalls();
     const cleanCalls = calls.filter(c => c[0] === "clean" && c[1] === "-fd");
@@ -562,14 +562,14 @@ describe("squashMerge — no git clean -fd in main repo", () => {
 
 describe("squashMerge — commit via tempfile", () => {
   it("commits via -F tempfile instead of -m", async () => {
-    await squashMerge(3, "proj", "feat/x", "feat: add widget", false);
+    await squashMerge(3, "feat/x", "feat: add widget", false);
 
     expect(gitCalls()).toContainEqual(["commit", "-F", "/tmp/commit-msg-3.txt"]);
     expect(mockWriteFileSync).toHaveBeenCalledWith("/tmp/commit-msg-3.txt", "feat: add widget");
   });
 
   it("cleans up tempfile after commit", async () => {
-    await squashMerge(3, "proj", "feat/x", "feat: test", false);
+    await squashMerge(3, "feat/x", "feat: test", false);
 
     expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith("/tmp/commit-msg-3.txt");
   });
@@ -583,7 +583,7 @@ describe("squashMerge — commit via tempfile", () => {
       return "";
     });
 
-    await expect(squashMerge(3, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
+    await expect(squashMerge(3, "feat/x", "feat: bad", false)).rejects.toThrow();
 
     expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith("/tmp/commit-msg-3.txt");
   });
@@ -607,7 +607,7 @@ describe("squashMerge — commit via tempfile", () => {
       return "";
     });
 
-    await squashMerge(6, "proj", "feat/x", "feat: widget", false);
+    await squashMerge(6, "feat/x", "feat: widget", false);
 
     expect(gitCalls()).toContainEqual(["commit", "-F", "/tmp/commit-msg-6.txt"]);
     expect(mockWriteFileSync).toHaveBeenCalledWith("/tmp/commit-msg-6.txt", "squashed: feat: widget");
@@ -629,7 +629,7 @@ describe("squashMerge — outer catch includes reset --hard", () => {
     });
 
     await expect(
-      squashMerge(5, "proj", "feat/x", "feat: bad", false),
+      squashMerge(5, "feat/x", "feat: bad", false),
     ).rejects.toThrow();
 
     const calls = gitCalls();

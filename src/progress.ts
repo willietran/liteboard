@@ -1,7 +1,7 @@
 import { writeFileSync, renameSync, readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import type { Task } from "./types.js";
+import type { Task, ProgressEntry } from "./types.js";
 
 const PROGRESS_FILE = "progress.md";
 
@@ -35,9 +35,9 @@ export function writeProgress(tasks: Task[], projectDir: string): void {
 
 // ─── readProgress ────────────────────────────────────────────────────────────
 
-export function readProgress(projectDir: string): Map<number, string> {
+export function readProgress(projectDir: string): Map<number, ProgressEntry> {
   const filePath = join(projectDir, PROGRESS_FILE);
-  const result = new Map<number, string>();
+  const result = new Map<number, ProgressEntry>();
 
   if (!existsSync(filePath)) {
     return result;
@@ -60,10 +60,9 @@ export function readProgress(projectDir: string): Map<number, string> {
     const completedAt = cells[3];
 
     if (status === "done" && completedAt) {
-      result.set(taskId, completedAt);
+      result.set(taskId, { status: "done", completedAt });
     } else if (status === "needs_human") {
-      // Sentinel value — T8 checks for "needs_human" to restore status correctly
-      result.set(taskId, "needs_human");
+      result.set(taskId, { status: "needs_human" });
     }
   }
 
