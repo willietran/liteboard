@@ -45,6 +45,19 @@ export function setupFeatureBranch(
   }
 }
 
+// ─── clearStaleWorktreePath ──────────────────────────────────────────────────
+
+function clearStaleWorktreePath(wtPath: string, verbose: boolean): void {
+  if (existsSync(wtPath)) {
+    try {
+      git(["worktree", "remove", wtPath, "--force"], { verbose });
+    } catch {
+      // Ignore — we'll rm the directory next
+    }
+    rmSync(wtPath, { recursive: true, force: true });
+  }
+}
+
 // ─── createWorktree ─────────────────────────────────────────────────────────
 
 export function createWorktree(
@@ -56,17 +69,10 @@ export function createWorktree(
   const wtPath = getWorktreePath(slug, taskId);
   const taskBranch = `${featureBranch}-t${taskId}`;
 
-  // Clean up stale worktree if path exists
-  if (existsSync(wtPath)) {
-    try {
-      git(["worktree", "remove", wtPath, "--force"], { verbose });
-    } catch {
-      // Ignore — we'll rm the directory next
-    }
-    rmSync(wtPath, { recursive: true, force: true });
-  }
+  clearStaleWorktreePath(wtPath, verbose);
 
   // Delete stale task branch if it exists
+  try { git(["worktree", "prune"], { verbose }); } catch {}
   try {
     git(["branch", "-D", taskBranch], { verbose });
   } catch {
@@ -98,12 +104,32 @@ export function cleanupWorktree(
   }
 
   if (!opts?.preserveBranch) {
+    try { git(["worktree", "prune"], { verbose }); } catch {}
     try {
       git(["branch", "-D", taskBranch], { verbose });
     } catch {
       // Always continue
     }
   }
+}
+
+// ─── recreateWorktreeFromBranch ──────────────────────────────────────────────
+
+export function recreateWorktreeFromBranch(
+  slug: string,
+  taskId: number,
+  featureBranch: string,
+  verbose: boolean,
+): string {
+  const wtPath = getWorktreePath(slug, taskId);
+  const taskBranch = `${featureBranch}-t${taskId}`;
+
+  clearStaleWorktreePath(wtPath, verbose);
+
+  // Create worktree from existing branch (no -b flag — branch already has commits)
+  git(["worktree", "add", wtPath, taskBranch], { verbose });
+
+  return wtPath;
 }
 
 // ─── cleanupAllWorktrees ────────────────────────────────────────────────────

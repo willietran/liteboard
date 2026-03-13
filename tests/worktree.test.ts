@@ -40,6 +40,7 @@ import {
   cleanupAllWorktrees,
   cleanupStaleWorktrees,
   getWorktreePath,
+  recreateWorktreeFromBranch,
 } from "../src/worktree.js";
 
 const mockExec = vi.mocked(execFileSync);
@@ -55,6 +56,7 @@ function makeTask(partial: Partial<Task> & { id: number }): Task {
     modifies: [],
     dependsOn: [],
     requirements: [],
+    explore: [],
     tddPhase: "GREEN",
     commitMessage: "",
     complexity: 1,
@@ -216,6 +218,24 @@ describe("createWorktree", () => {
       expect.anything(),
     );
   });
+
+  it("runs worktree prune before deleting stale task branch", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    createWorktree("my-proj", 5, "feat/cool", false);
+
+    const calls = mockExec.mock.calls
+      .filter(c => c[0] === "git")
+      .map(c => c[1] as string[]);
+
+    const pruneIdx = calls.findIndex(c => c[0] === "worktree" && c[1] === "prune");
+    const branchDeleteIdx = calls.findIndex(c => c[0] === "branch" && c[1] === "-D");
+
+    expect(pruneIdx).toBeGreaterThan(-1);
+    expect(branchDeleteIdx).toBeGreaterThan(-1);
+    expect(pruneIdx).toBeLessThan(branchDeleteIdx);
+  });
 });
 
 // ─── cleanupWorktree ────────────────────────────────────────────────────────
@@ -277,6 +297,98 @@ describe("cleanupWorktree", () => {
       ["branch", "-D", "feat/cool-t2"],
       expect.anything(),
     );
+  });
+
+  it("runs worktree prune before deleting task branch", () => {
+    mockExec.mockReturnValue(Buffer.from(""));
+
+    cleanupWorktree("my-proj", 2, "feat/cool", false);
+
+    const calls = mockExec.mock.calls
+      .filter(c => c[0] === "git")
+      .map(c => c[1] as string[]);
+
+    const pruneIdx = calls.findIndex(c => c[0] === "worktree" && c[1] === "prune");
+    const branchDeleteIdx = calls.findIndex(c => c[0] === "branch" && c[1] === "-D");
+
+    expect(pruneIdx).toBeGreaterThan(-1);
+    expect(branchDeleteIdx).toBeGreaterThan(-1);
+    expect(pruneIdx).toBeLessThan(branchDeleteIdx);
+  });
+
+  it("skips worktree prune when preserveBranch is true", () => {
+    mockExec.mockReturnValue(Buffer.from(""));
+
+    cleanupWorktree("my-proj", 2, "feat/cool", false, { preserveBranch: true });
+
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "git",
+      ["worktree", "prune"],
+      expect.anything(),
+    );
+  });
+});
+
+// ─── recreateWorktreeFromBranch ──────────────────────────────────────────────
+
+describe("recreateWorktreeFromBranch", () => {
+  it("creates worktree from existing branch without -b flag", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    recreateWorktreeFromBranch("my-proj", 7, "feat/cool", false);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "/tmp/liteboard-my-proj-t7", "feat/cool-t7"],
+      expect.anything(),
+    );
+    // Must NOT have been called with -b flag
+    const addCalls = mockExec.mock.calls
+      .filter(c => c[0] === "git" && (c[1] as string[])[0] === "worktree" && (c[1] as string[])[1] === "add");
+    for (const call of addCalls) {
+      expect(call[1] as string[]).not.toContain("-b");
+    }
+  });
+
+  it("returns correct worktree path", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    const p = recreateWorktreeFromBranch("my-proj", 7, "feat/cool", false);
+
+    expect(p).toBe("/tmp/liteboard-my-proj-t7");
+  });
+
+  it("cleans up stale worktree if path exists", () => {
+    mockExists.mockReturnValue(true);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    recreateWorktreeFromBranch("my-proj", 3, "feat/cool", false);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "remove", "/tmp/liteboard-my-proj-t3", "--force"],
+      expect.anything(),
+    );
+    expect(mockRm).toHaveBeenCalledWith("/tmp/liteboard-my-proj-t3", { recursive: true, force: true });
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "/tmp/liteboard-my-proj-t3", "feat/cool-t3"],
+      expect.anything(),
+    );
+  });
+
+  it("does not delete the existing branch (preserves commits)", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    recreateWorktreeFromBranch("my-proj", 5, "feat/cool", false);
+
+    const branchDeleteCalls = mockExec.mock.calls.filter(
+      c => c[0] === "git" && (c[1] as string[])[0] === "branch" && (c[1] as string[])[1] === "-D",
+    );
+    expect(branchDeleteCalls).toHaveLength(0);
   });
 });
 

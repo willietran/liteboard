@@ -10,6 +10,11 @@ vi.mock("node:fs", () => ({
   unlinkSync: vi.fn(),
   existsSync: vi.fn(),
   readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+}));
+
+vi.mock("node:os", () => ({
+  tmpdir: vi.fn(() => "/tmp"),
 }));
 
 vi.mock("../src/build-validation.js", () => ({
@@ -30,6 +35,7 @@ import { runBuildValidation } from "../src/build-validation.js";
 
 const mockExec = vi.mocked(execFileSync);
 const mockExistsSync = vi.mocked(fs.existsSync);
+const mockWriteFileSync = vi.mocked(fs.writeFileSync);
 const mockRunBuildValidation = vi.mocked(runBuildValidation);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -93,7 +99,8 @@ describe("squashMerge — trial merge succeeds", () => {
       "--no-commit",
       "feat/x-t3",
     ]);
-    expect(gitCalls()).toContainEqual(["commit", "-m", "feat: add widget"]);
+    expect(gitCalls()).toContainEqual(["commit", "-F", "/tmp/commit-msg-3.txt"]);
+    expect(mockWriteFileSync).toHaveBeenCalledWith("/tmp/commit-msg-3.txt", "feat: add widget");
   });
 
   it("removes ephemeral files (including .qa-report.md) from staging before commit", async () => {
@@ -317,7 +324,7 @@ describe("squashMerge — no package.json", () => {
     expect(mockRunBuildValidation).toHaveBeenCalled();
 
     // Commit still happens
-    expect(gitCalls()).toContainEqual(["commit", "-m", "chore: no-npm"]);
+    expect(gitCalls()).toContainEqual(["commit", "-F", "/tmp/commit-msg-7.txt"]);
   });
 });
 
@@ -366,11 +373,8 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
 
     expect(calls).toContainEqual(["checkout", "feat/x-t6"]);
     expect(calls).toContainEqual(["reset", "--soft", "feat/x"]);
-    expect(calls).toContainEqual([
-      "commit",
-      "-m",
-      "squashed: feat: widget",
-    ]);
+    expect(calls).toContainEqual(["commit", "-F", "/tmp/commit-msg-6.txt"]);
+    expect(mockWriteFileSync).toHaveBeenCalledWith("/tmp/commit-msg-6.txt", "squashed: feat: widget");
     expect(calls).toContainEqual(["rebase", "feat/x"]);
 
     const checkoutFeatureCalls = calls.filter(
@@ -421,7 +425,7 @@ describe("squashMerge — non-package conflict triggers squash-rebase-retry", ()
     // Full rebase-retry sequence should follow
     expect(calls).toContainEqual(["checkout", "feat/x-t7"]);
     expect(calls).toContainEqual(["reset", "--soft", "feat/x"]);
-    expect(calls).toContainEqual(["commit", "-m", "squashed: fix: config"]);
+    expect(calls).toContainEqual(["commit", "-F", "/tmp/commit-msg-7.txt"]);
     expect(calls).toContainEqual(["rebase", "feat/x"]);
   });
 });
@@ -473,7 +477,7 @@ describe("squashMerge — dirty index guard", () => {
     await squashMerge(1, "proj", "feat/x", "feat: test", false);
 
     const calls = gitCalls();
-    expect(calls).toContainEqual(["commit", "-m", "feat: test"]);
+    expect(calls).toContainEqual(["commit", "-F", "/tmp/commit-msg-1.txt"]);
   });
 
   it("skips reset when index is clean", async () => {
@@ -501,6 +505,186 @@ describe("squashMerge — dirty index guard", () => {
       (c, i) => i > statusIdx && i < checkoutIdx && c[0] === "reset" && c[1] === "--hard",
     );
     expect(resetsBetween).toHaveLength(0);
+  });
+});
+
+// ─── git clean -fd after reset --hard ─────────────────────────────────────────
+
+describe("squashMerge — git clean -fd after reset --hard", () => {
+  it("calls git clean -fd after reset --hard in abortAndRecover", () => {
+    abortAndRecover("feat/x", false);
+
+    const calls = gitCalls();
+    const resetIdx = calls.findIndex(c => c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
+    expect(resetIdx).toBeGreaterThan(-1);
+
+    const cleanIdx = calls.findIndex((c, i) => i > resetIdx && c[0] === "clean" && c[1] === "-fd");
+    expect(cleanIdx).toBeGreaterThan(resetIdx);
+  });
+
+  it("calls git clean -fd after reset --hard in dirty index guard", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "status" && a[1] === "--porcelain") {
+        return "M  src/dirty.ts";
+      }
+      return "";
+    });
+
+    await squashMerge(1, "proj", "feat/x", "feat: test", false);
+
+    const calls = gitCalls();
+    const statusIdx = calls.findIndex(c => c[0] === "status" && c[1] === "--porcelain");
+    const resetIdx = calls.findIndex((c, i) => i > statusIdx && c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
+    expect(resetIdx).toBeGreaterThan(statusIdx);
+
+    const cleanIdx = calls.findIndex((c, i) => i > resetIdx && c[0] === "clean" && c[1] === "-fd");
+    expect(cleanIdx).toBeGreaterThan(resetIdx);
+  });
+
+  it("calls git clean -fd after reset --hard on build failure (resetAndThrow)", async () => {
+    mockRunBuildValidation.mockReturnValue({
+      success: false,
+      failedPhase: "build",
+      error: "build failed",
+      stderr: "tsc error",
+      tscErrorCount: 1,
+      testFailCount: 0,
+      testPassCount: 0,
+    });
+
+    await expect(squashMerge(2, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
+
+    const calls = gitCalls();
+    const cleanCalls = calls.filter(c => c[0] === "clean" && c[1] === "-fd");
+    expect(cleanCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("calls git clean -fd after reset --hard in outer catch", async () => {
+    mockRunBuildValidation.mockReturnValue({
+      success: false,
+      failedPhase: "build",
+      error: "build failed",
+      stderr: "tsc error",
+      tscErrorCount: 1,
+      testFailCount: 0,
+      testPassCount: 0,
+    });
+
+    await expect(squashMerge(5, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
+
+    const calls = gitCalls();
+    const lastReset = calls.findLastIndex(c => c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
+    const lastClean = calls.findLastIndex(c => c[0] === "clean" && c[1] === "-fd");
+    expect(lastClean).toBeGreaterThan(lastReset);
+  });
+
+  it("calls git clean -fd after reset --hard in non-package conflict resolution", async () => {
+    let mergeAttempt = 0;
+
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--squash") {
+        mergeAttempt++;
+        if (mergeAttempt === 1) throw new Error("merge conflict");
+        return "";
+      }
+      if (cmd === "git" && a[0] === "diff" && a.includes("--diff-filter=U")) {
+        return "src/index.ts";
+      }
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
+        throw new Error("fatal: There is no merge to abort (MERGE_HEAD missing)");
+      }
+      return "";
+    });
+
+    await squashMerge(6, "proj", "feat/x", "feat: widget", false);
+
+    const calls = gitCalls();
+    const firstMergeSquashIdx = calls.findIndex(c => c[0] === "merge" && c[1] === "--squash");
+    const resetIdx = calls.findIndex((c, i) => i > firstMergeSquashIdx && c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
+    expect(resetIdx).toBeGreaterThan(firstMergeSquashIdx);
+
+    const cleanIdx = calls.findIndex((c, i) => i > resetIdx && c[0] === "clean" && c[1] === "-fd");
+    expect(cleanIdx).toBeGreaterThan(resetIdx);
+  });
+
+  it("calls git clean -fd after reset --hard in resolveErr catch", async () => {
+    let mergeAttempt = 0;
+
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--squash") {
+        mergeAttempt++;
+        throw new Error("merge conflict");
+      }
+      if (cmd === "git" && a[0] === "diff" && a.includes("--diff-filter=U")) {
+        throw new Error("diff failed");
+      }
+      return "";
+    });
+
+    await expect(squashMerge(3, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
+
+    const calls = gitCalls();
+    const cleanCalls = calls.filter(c => c[0] === "clean" && c[1] === "-fd");
+    expect(cleanCalls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ─── commit via tempfile ──────────────────────────────────────────────────────
+
+describe("squashMerge — commit via tempfile", () => {
+  it("commits via -F tempfile instead of -m", async () => {
+    await squashMerge(3, "proj", "feat/x", "feat: add widget", false);
+
+    expect(gitCalls()).toContainEqual(["commit", "-F", "/tmp/commit-msg-3.txt"]);
+    expect(mockWriteFileSync).toHaveBeenCalledWith("/tmp/commit-msg-3.txt", "feat: add widget");
+  });
+
+  it("cleans up tempfile after commit", async () => {
+    await squashMerge(3, "proj", "feat/x", "feat: test", false);
+
+    expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith("/tmp/commit-msg-3.txt");
+  });
+
+  it("cleans up tempfile even when commit throws", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "commit") {
+        throw new Error("commit failed");
+      }
+      return "";
+    });
+
+    await expect(squashMerge(3, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
+
+    expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith("/tmp/commit-msg-3.txt");
+  });
+
+  it("squash commit during rebase-retry also uses -F tempfile", async () => {
+    let mergeAttempt = 0;
+
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--squash") {
+        mergeAttempt++;
+        if (mergeAttempt === 1) throw new Error("merge conflict");
+        return "";
+      }
+      if (cmd === "git" && a[0] === "diff" && a.includes("--diff-filter=U")) {
+        return "src/index.ts";
+      }
+      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
+        throw new Error("fatal: There is no merge to abort (MERGE_HEAD missing)");
+      }
+      return "";
+    });
+
+    await squashMerge(6, "proj", "feat/x", "feat: widget", false);
+
+    expect(gitCalls()).toContainEqual(["commit", "-F", "/tmp/commit-msg-6.txt"]);
+    expect(mockWriteFileSync).toHaveBeenCalledWith("/tmp/commit-msg-6.txt", "squashed: feat: widget");
   });
 });
 

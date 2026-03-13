@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { git } from "./git.js";
 import { createMutex } from "./mutex.js";
 import { getErrorMessage, getErrorStderr } from "./errors.js";
@@ -19,12 +21,25 @@ function resetAndThrow(
 ): never {
   try {
     git(["reset", "--hard", "HEAD"], { verbose });
+    git(["clean", "-fd"], { verbose });
   } catch (resetErr) {
     console.error(`[merger] git reset also failed for task ${taskId}: ${getErrorMessage(resetErr)}`);
   }
   throw new Error(
     `${label} failed for task ${taskId}: ${getErrorStderr(error) || getErrorMessage(error)}`,
   );
+}
+
+// ─── commitViaFile helper ─────────────────────────────────────────────────────
+
+function commitViaFile(taskId: number, message: string, verbose: boolean): void {
+  const msgFile = path.join(tmpdir(), `commit-msg-${taskId}.txt`);
+  fs.writeFileSync(msgFile, message);
+  try {
+    git(["commit", "-F", msgFile], { verbose });
+  } finally {
+    try { fs.unlinkSync(msgFile); } catch {}
+  }
 }
 
 // ─── squashMerge ─────────────────────────────────────────────────────────────
@@ -47,6 +62,7 @@ export async function squashMerge(
         console.error(`[merger] dirty index detected before merge for task ${taskId}, resetting`);
         try { git(["merge", "--abort"], { verbose }); } catch {}
         try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
+        try { git(["clean", "-fd"], { verbose }); } catch {}
       }
 
       // Resolve repo root so npm commands run from the right directory
@@ -94,11 +110,12 @@ export async function squashMerge(
             // --squash does not create MERGE_HEAD, so merge --abort won't work.
             // reset --hard restores the feature branch to its pre-merge state.
             git(["reset", "--hard", "HEAD"], { verbose });
+            git(["clean", "-fd"], { verbose });
 
             // Squash task branch to a single commit
             git(["checkout", taskBranch], { verbose });
             git(["reset", "--soft", featureBranch], { verbose });
-            git(["commit", "-m", `squashed: ${commitMessage}`], { verbose });
+            commitViaFile(taskId, `squashed: ${commitMessage}`, verbose);
 
             // Rebase onto feature branch
             try {
@@ -118,6 +135,7 @@ export async function squashMerge(
           try {
             git(["reset", "--hard", "HEAD"], { verbose });
           } catch {}
+          try { git(["clean", "-fd"], { verbose }); } catch {}
           try {
             git(["checkout", featureBranch], { verbose });
           } catch {}
@@ -155,7 +173,7 @@ export async function squashMerge(
       }
 
       // Step 4: Commit
-      git(["commit", "-m", commitMessage], { verbose });
+      commitViaFile(taskId, commitMessage, verbose);
     } catch (e) {
       // Recovery: ensure feature branch is clean for the next queued merge.
       // Note: resetAndThrow() already calls reset --hard for build failures,
@@ -164,6 +182,7 @@ export async function squashMerge(
       try { git(["merge", "--abort"], { verbose }); } catch {}
       try { git(["checkout", featureBranch], { verbose }); } catch {}
       try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
+      try { git(["clean", "-fd"], { verbose }); } catch {}
       throw e;
     }
   });
@@ -184,4 +203,5 @@ export function abortAndRecover(
   try {
     git(["reset", "--hard", "HEAD"], { verbose });
   } catch {}
+  try { git(["clean", "-fd"], { verbose }); } catch {}
 }
