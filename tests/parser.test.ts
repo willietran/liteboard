@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseManifest } from "../src/parser.js";
-import type { Task } from "../src/types.js";
+import { parseManifest, parseSessions } from "../src/parser.js";
+import type { Task, Session } from "../src/types.js";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -617,6 +617,359 @@ describe("parseManifest", () => {
       const tasks = parseManifest(manifestPath);
       // parseBulletList finds no bullets after "(none)" on the header line
       expect(tasks[0].explore).toEqual([]);
+    });
+  });
+
+  // ── 12. suggestedSession field parsing ───────────────────────────────────
+
+  describe("parses Suggested Session field", () => {
+    it("parses Suggested Session as string when present", () => {
+      const manifest = `
+### Task 1: Types update
+
+**Complexity Score:** 3
+**Suggested Session:** S1
+
+### Task 2: Parser update
+
+**Depends on:** Task 1
+**Complexity Score:** 5
+**Suggested Session:** S2
+`.trimStart();
+      const manifestPath = writeTmpManifest("suggested-session.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].suggestedSession).toBe("S1");
+      expect(tasks[1].suggestedSession).toBe("S2");
+    });
+
+    it("leaves suggestedSession undefined when field is absent", () => {
+      const manifestPath = writeTmpManifest("no-session.md", SAMPLE_MANIFEST);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].suggestedSession).toBeUndefined();
+      expect(tasks[1].suggestedSession).toBeUndefined();
+    });
+
+    it("multiple tasks can share the same suggestedSession", () => {
+      const manifest = `
+### Task 1: First
+
+**Complexity Score:** 3
+**Suggested Session:** S1
+
+### Task 2: Second
+
+**Complexity Score:** 5
+**Suggested Session:** S1
+`.trimStart();
+      const manifestPath = writeTmpManifest("shared-session.md", manifest);
+      const tasks = parseManifest(manifestPath);
+      expect(tasks[0].suggestedSession).toBe("S1");
+      expect(tasks[1].suggestedSession).toBe("S1");
+    });
+  });
+});
+
+// ─── parseSessions Tests ──────────────────────────────────────────────────────
+
+// Helper to create a minimal Task object
+function makeTask(overrides: Partial<Task> & Pick<Task, "id" | "title">): Task {
+  return {
+    creates: [],
+    modifies: [],
+    dependsOn: [],
+    requirements: [],
+    explore: [],
+    tddPhase: "",
+    commitMessage: "",
+    complexity: 3,
+    status: "queued",
+    stage: "",
+    turnCount: 0,
+    lastLine: "",
+    bytesReceived: 0,
+    ...overrides,
+  };
+}
+
+const MANIFEST_WITH_HINTS = `
+# Task Manifest
+
+## Session-Grouping Hints
+
+| Session | Tasks | Layer | Total Complexity | Focus |
+|---------|-------|-------|-----------------|-------|
+| S1 | T1, T5 | 0 | 8 | Types/config + brief improvements |
+| S2 | T2, T3 | 0 | 6 | Git cleanup + spawner resilience |
+
+### Task 1: Types update
+
+**Complexity Score:** 3
+**Suggested Session:** S1
+
+### Task 2: Git cleanup
+
+**Complexity Score:** 3
+**Suggested Session:** S2
+
+### Task 3: Spawner resilience
+
+**Depends on:** Task 2
+**Complexity Score:** 3
+**Suggested Session:** S2
+`.trimStart();
+
+describe("parseSessions", () => {
+  // ── Groups tasks by suggestedSession ─────────────────────────────────────
+
+  describe("groups tasks by suggestedSession hint", () => {
+    it("creates one session per unique suggestedSession value", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "Types update", complexity: 3, suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "Git cleanup", complexity: 3, suggestedSession: "S2" }),
+        makeTask({ id: 3, title: "Spawner resilience", complexity: 3, suggestedSession: "S2", dependsOn: [2], status: "blocked" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions).toHaveLength(2);
+    });
+
+    it("assigns all tasks with the same session hint to the same session", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", complexity: 3, suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", complexity: 4, suggestedSession: "S1" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].tasks.map((t) => t.id)).toEqual([1, 2]);
+    });
+
+    it("computes complexity as sum of task complexities", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", complexity: 3, suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", complexity: 5, suggestedSession: "S1" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].complexity).toBe(8);
+    });
+
+    it("session id matches the suggestedSession value", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", complexity: 2, suggestedSession: "S3" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].id).toBe("S3");
+    });
+  });
+
+  // ── Auto-generates sessions for tasks without hints ───────────────────────
+
+  describe("auto-generates sessions for tasks without suggestedSession", () => {
+    it("creates a single-task session for each unsorted task", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "Standalone task" }),
+        makeTask({ id: 2, title: "Another standalone" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions).toHaveLength(2);
+    });
+
+    it("auto-session id is S-auto-T<taskId>", () => {
+      const tasks = [makeTask({ id: 5, title: "Orphan task" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].id).toBe("S-auto-T5");
+    });
+
+    it("auto-session contains exactly the one task", () => {
+      const tasks = [makeTask({ id: 3, title: "Solo" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].tasks).toHaveLength(1);
+      expect(sessions[0].tasks[0].id).toBe(3);
+    });
+  });
+
+  // ── Mixed: some with hints, some without ────────────────────────────────
+
+  describe("handles mixed tasks (some with hints, some without)", () => {
+    it("returns correct session count for mixed input", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
+        makeTask({ id: 3, title: "T3" }), // no hint
+      ];
+      const sessions = parseSessions(tasks, "");
+      // S1 (2 tasks) + auto-T3 (1 task)
+      expect(sessions).toHaveLength(2);
+    });
+
+    it("auto-session id does not conflict with named sessions", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      const ids = sessions.map((s) => s.id);
+      expect(ids).toContain("S1");
+      expect(ids).toContain("S-auto-T2");
+    });
+  });
+
+  // ── Focus derivation from hints table ────────────────────────────────────
+
+  describe("derives focus from session-grouping hints table", () => {
+    it("uses focus column from hints table when available", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "Types update", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "Git cleanup", suggestedSession: "S2" }),
+        makeTask({ id: 3, title: "Spawner resilience", dependsOn: [2], status: "blocked", suggestedSession: "S2" }),
+      ];
+      const sessions = parseSessions(tasks, MANIFEST_WITH_HINTS);
+      const s1 = sessions.find((s) => s.id === "S1")!;
+      const s2 = sessions.find((s) => s.id === "S2")!;
+      expect(s1.focus).toBe("Types/config + brief improvements");
+      expect(s2.focus).toBe("Git cleanup + spawner resilience");
+    });
+
+    it("falls back to joined task titles when session not in hints table", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "My Feature", suggestedSession: "S99" }),
+      ];
+      const sessions = parseSessions(tasks, MANIFEST_WITH_HINTS);
+      const s = sessions.find((s) => s.id === "S99")!;
+      expect(s.focus).toBe("My Feature");
+    });
+
+    it("joins multiple task titles with ', ' when no hints entry found", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "Feature A", suggestedSession: "S99" }),
+        makeTask({ id: 2, title: "Feature B", suggestedSession: "S99" }),
+      ];
+      const sessions = parseSessions(tasks, MANIFEST_WITH_HINTS);
+      const s = sessions[0];
+      expect(s.focus).toBe("Feature A, Feature B");
+    });
+
+    it("derives focus from task title for auto-sessions", () => {
+      const tasks = [makeTask({ id: 7, title: "Lonely task" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].focus).toBe("Lonely task");
+    });
+  });
+
+  // ── Focus derivation without hints table ────────────────────────────────
+
+  describe("derives focus from task titles when no hints table present", () => {
+    it("uses single task title as focus", () => {
+      const tasks = [makeTask({ id: 1, title: "Do something", suggestedSession: "S1" })];
+      const sessions = parseSessions(tasks, "no table here");
+      expect(sessions[0].focus).toBe("Do something");
+    });
+
+    it("joins multiple task titles as focus", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "Task Alpha", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "Task Beta", suggestedSession: "S1" }),
+      ];
+      const sessions = parseSessions(tasks, "no table here");
+      expect(sessions[0].focus).toBe("Task Alpha, Task Beta");
+    });
+  });
+
+  // ── Runtime field initialization ─────────────────────────────────────────
+
+  describe("initializes all runtime fields to defaults", () => {
+    it("status is 'queued' when all tasks are queued", () => {
+      const tasks = [makeTask({ id: 1, title: "T1", status: "queued", suggestedSession: "S1" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].status).toBe("queued");
+    });
+
+    it("status is 'blocked' when any task in the session is blocked", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", status: "queued", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", status: "blocked", dependsOn: [1], suggestedSession: "S1" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].status).toBe("blocked");
+    });
+
+    it("sets bytesReceived to 0", () => {
+      const tasks = [makeTask({ id: 1, title: "T1", suggestedSession: "S1" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].bytesReceived).toBe(0);
+    });
+
+    it("sets turnCount to 0", () => {
+      const tasks = [makeTask({ id: 1, title: "T1", suggestedSession: "S1" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].turnCount).toBe(0);
+    });
+
+    it("sets lastLine to empty string", () => {
+      const tasks = [makeTask({ id: 1, title: "T1", suggestedSession: "S1" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].lastLine).toBe("");
+    });
+
+    it("sets stage to empty string", () => {
+      const tasks = [makeTask({ id: 1, title: "T1", suggestedSession: "S1" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].stage).toBe("");
+    });
+
+    it("sets attemptCount to 0", () => {
+      const tasks = [makeTask({ id: 1, title: "T1", suggestedSession: "S1" })];
+      const sessions = parseSessions(tasks, "");
+      expect(sessions[0].attemptCount).toBe(0);
+    });
+  });
+
+  // ── Layer consistency validation ─────────────────────────────────────────
+
+  describe("validates layer consistency when taskLayerMap provided", () => {
+    it("does not throw when all tasks in a session share the same layer", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
+      ];
+      const layerMap = new Map([[1, 0], [2, 0]]);
+      expect(() => parseSessions(tasks, "", layerMap)).not.toThrow();
+    });
+
+    it("throws when tasks in a session span multiple layers", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
+      ];
+      const layerMap = new Map([[1, 0], [2, 1]]);
+      expect(() => parseSessions(tasks, "", layerMap)).toThrow(/cross-layer/i);
+    });
+
+    it("does not validate layers when taskLayerMap is not provided", () => {
+      const tasks = [
+        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
+      ];
+      expect(() => parseSessions(tasks, "")).not.toThrow();
+    });
+  });
+
+  // ── Stable sort order ────────────────────────────────────────────────────
+
+  describe("returns sessions in stable order by first task id", () => {
+    it("orders sessions by the smallest task id in each session", () => {
+      const tasks = [
+        makeTask({ id: 3, title: "T3", suggestedSession: "S2" }),
+        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
+        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
+      ];
+      const sessions = parseSessions(tasks, "");
+      // S1 has task 1 (min id = 1), S2 has task 3 (min id = 3)
+      expect(sessions[0].id).toBe("S1");
+      expect(sessions[1].id).toBe("S2");
+    });
+
+    it("returns empty array for empty task list", () => {
+      const sessions = parseSessions([], "");
+      expect(sessions).toEqual([]);
     });
   });
 });

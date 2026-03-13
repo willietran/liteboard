@@ -3,6 +3,10 @@ import {
   defaultModelConfig,
   LOW_COMPLEXITY_THRESHOLD,
   type TaskStatus,
+  type SessionStatus,
+  type Session,
+  type ProgressEntry,
+  type SessionProgressEntry,
   type FailureStage,
   type ErrorClass,
   type TriageAction,
@@ -157,6 +161,16 @@ describe("Task interface extensions", () => {
     expect(partial.skipArchitect).toBeUndefined();
     expect(partial.attemptCount).toBeUndefined();
   });
+
+  it("accepts suggestedSession as optional string", () => {
+    const partial: Pick<Task, "suggestedSession"> = { suggestedSession: "S1" };
+    expect(partial.suggestedSession).toBe("S1");
+  });
+
+  it("does not require suggestedSession (undefined by default)", () => {
+    const partial: Pick<Task, "suggestedSession"> = {};
+    expect(partial.suggestedSession).toBeUndefined();
+  });
 });
 
 describe("Triage types", () => {
@@ -267,5 +281,132 @@ describe("Triage types", () => {
     expect(ctx.state.branchExists).toBe(true);
     expect(ctx.history).toHaveLength(0);
     expect(ctx.actions).toHaveLength(0);
+  });
+});
+
+describe("SessionStatus type", () => {
+  it("accepts all valid session status values", () => {
+    const statuses: SessionStatus[] = [
+      "queued", "blocked", "running", "merging", "done", "failed", "needs_human",
+    ];
+    expect(statuses).toHaveLength(7);
+  });
+
+  it("accepts queued status", () => {
+    const s: SessionStatus = "queued";
+    expect(s).toBe("queued");
+  });
+
+  it("accepts blocked status", () => {
+    const s: SessionStatus = "blocked";
+    expect(s).toBe("blocked");
+  });
+
+  it("accepts running status", () => {
+    const s: SessionStatus = "running";
+    expect(s).toBe("running");
+  });
+
+  it("accepts merging status", () => {
+    const s: SessionStatus = "merging";
+    expect(s).toBe("merging");
+  });
+
+  it("accepts done status", () => {
+    const s: SessionStatus = "done";
+    expect(s).toBe("done");
+  });
+
+  it("accepts failed status", () => {
+    const s: SessionStatus = "failed";
+    expect(s).toBe("failed");
+  });
+
+  it("accepts needs_human status", () => {
+    const s: SessionStatus = "needs_human";
+    expect(s).toBe("needs_human");
+  });
+});
+
+describe("Session interface", () => {
+  it("requires identity fields: id, tasks, complexity, focus", () => {
+    const session: Pick<Session, "id" | "tasks" | "complexity" | "focus"> = {
+      id: "S1",
+      tasks: [],
+      complexity: 8,
+      focus: "Types/config + brief improvements",
+    };
+    expect(session.id).toBe("S1");
+    expect(session.tasks).toEqual([]);
+    expect(session.complexity).toBe(8);
+    expect(session.focus).toBe("Types/config + brief improvements");
+  });
+
+  it("requires runtime state fields with correct defaults", () => {
+    const session: Pick<Session, "status" | "bytesReceived" | "turnCount" | "lastLine" | "stage" | "attemptCount"> = {
+      status: "queued",
+      bytesReceived: 0,
+      turnCount: 0,
+      lastLine: "",
+      stage: "",
+      attemptCount: 0,
+    };
+    expect(session.status).toBe("queued");
+    expect(session.bytesReceived).toBe(0);
+    expect(session.turnCount).toBe(0);
+    expect(session.lastLine).toBe("");
+    expect(session.stage).toBe("");
+    expect(session.attemptCount).toBe(0);
+  });
+
+  it("accepts optional fields as undefined", () => {
+    const session: Pick<Session, "process" | "worktreePath" | "branchName" | "startedAt" | "completedAt" | "logPath" | "provider" | "skipArchitect"> = {};
+    expect(session.process).toBeUndefined();
+    expect(session.worktreePath).toBeUndefined();
+    expect(session.branchName).toBeUndefined();
+    expect(session.startedAt).toBeUndefined();
+    expect(session.completedAt).toBeUndefined();
+    expect(session.logPath).toBeUndefined();
+    expect(session.provider).toBeUndefined();
+    expect(session.skipArchitect).toBeUndefined();
+  });
+
+  it("accepts string values for optional fields", () => {
+    const session: Pick<Session, "worktreePath" | "branchName" | "startedAt" | "completedAt" | "logPath" | "provider"> = {
+      worktreePath: "/tmp/worktrees/s1",
+      branchName: "feature/my-branch-s1",
+      startedAt: "2026-03-13T10:00:00Z",
+      completedAt: "2026-03-13T11:00:00Z",
+      logPath: "/tmp/logs/s1.log",
+      provider: "claude",
+    };
+    expect(session.worktreePath).toBe("/tmp/worktrees/s1");
+    expect(session.branchName).toBe("feature/my-branch-s1");
+    expect(session.provider).toBe("claude");
+  });
+});
+
+describe("SessionProgressEntry type", () => {
+  it("accepts done variant with completedAt timestamp", () => {
+    const entry: SessionProgressEntry = { status: "done", completedAt: "2026-03-13T10:00:00Z" };
+    expect(entry.status).toBe("done");
+    if (entry.status === "done") {
+      expect(entry.completedAt).toBe("2026-03-13T10:00:00Z");
+    }
+  });
+
+  it("accepts needs_human variant", () => {
+    const entry: SessionProgressEntry = { status: "needs_human" };
+    expect(entry.status).toBe("needs_human");
+  });
+
+  it("is structurally parallel to ProgressEntry", () => {
+    // ProgressEntry and SessionProgressEntry have the same variant shapes
+    const sessionEntry: SessionProgressEntry = { status: "done", completedAt: "2026-03-13T00:00:00Z" };
+    const taskEntry: ProgressEntry = { status: "done", completedAt: "2026-03-13T00:00:00Z" };
+    expect(sessionEntry.status).toBe(taskEntry.status);
+    if (sessionEntry.status === "done" && taskEntry.status === "done") {
+      expect(sessionEntry.completedAt).toBe(taskEntry.completedAt);
+    }
   });
 });

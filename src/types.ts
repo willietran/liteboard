@@ -71,6 +71,7 @@ export interface Task {
   provider?: string;
   skipArchitect?: boolean;
   attemptCount?: number;
+  suggestedSession?: string;
 }
 
 // ─── Ollama Config ────────────────────────────────────────────────────────
@@ -307,6 +308,45 @@ export interface BuildValidationResult {
 // ─── Progress Entry ───────────────────────────────────────────────────────
 
 export type ProgressEntry =
+  | { status: "done"; completedAt: string }
+  | { status: "needs_human" };
+
+// ─── Session ──────────────────────────────────────────────────────────────
+
+export type SessionStatus =
+  | "queued"
+  | "blocked"
+  | "running"
+  | "merging"
+  | "done"
+  | "failed"
+  | "needs_human";
+
+export interface Session {
+  // Identity
+  id: string;
+  tasks: Task[];
+  complexity: number;
+  focus: string;
+
+  // Runtime state
+  status: SessionStatus;
+  process?: ChildProcess;
+  worktreePath?: string;
+  branchName?: string;
+  startedAt?: string;
+  completedAt?: string;
+  bytesReceived: number;
+  turnCount: number;
+  lastLine: string;
+  stage: string;
+  logPath?: string;
+  provider?: string;
+  attemptCount: number;
+  skipArchitect?: boolean;
+}
+
+export type SessionProgressEntry =
   | { status: "done"; completedAt: string }
   | { status: "needs_human" };
 
