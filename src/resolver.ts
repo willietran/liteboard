@@ -1,4 +1,4 @@
-import type { Task, Layer } from "./types.js";
+import type { Task, Layer, Session } from "./types.js";
 
 // ─── File Conflict Detection ─────────────────────────────────────────────────
 
@@ -10,6 +10,84 @@ export function hasFileConflict(a: Task, b: Task): boolean {
   const filesA = new Set([...a.creates, ...a.modifies]);
   const filesB = [...b.creates, ...b.modifies];
   return filesB.some((f) => filesA.has(f));
+}
+
+// ─── Session Dependency Resolution ───────────────────────────────────────────
+
+/**
+ * For each session, collects all cross-session dependencies by inspecting
+ * each task's `dependsOn` and checking if the referenced task lives in a
+ * different session. Intra-session dependencies are ignored.
+ *
+ * Returns a map of session ID → list of unique dependency session IDs.
+ */
+export function resolveSessionDependencies(sessions: Session[]): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  if (sessions.length === 0) return result;
+
+  // Build a lookup: task ID → session ID
+  const taskOwner = new Map<number, string>();
+  for (const session of sessions) {
+    for (const task of session.tasks) {
+      taskOwner.set(task.id, session.id);
+    }
+  }
+
+  for (const session of sessions) {
+    const depSessionIds = new Set<string>();
+    for (const task of session.tasks) {
+      for (const depId of task.dependsOn) {
+        const ownerSessionId = taskOwner.get(depId);
+        if (ownerSessionId !== undefined && ownerSessionId !== session.id) {
+          depSessionIds.add(ownerSessionId);
+        }
+      }
+    }
+    result.set(session.id, [...depSessionIds]);
+  }
+
+  return result;
+}
+
+/**
+ * Returns the subset of sessions that are ready to run: status is "queued"
+ * and every dependency session has status "done". Sessions absent from the
+ * deps map are treated as having no dependencies.
+ */
+export function getReadySessions(sessions: Session[], deps: Map<string, string[]>): Session[] {
+  if (sessions.length === 0) return [];
+
+  const sessionById = new Map<string, Session>();
+  for (const session of sessions) {
+    sessionById.set(session.id, session);
+  }
+
+  return sessions.filter((session) => {
+    if (session.status !== "queued") return false;
+    const sessionDeps = deps.get(session.id) ?? [];
+    return sessionDeps.every((depId) => sessionById.get(depId)?.status === "done");
+  });
+}
+
+/**
+ * Returns true if sessions `a` and `b` touch any of the same files across
+ * all their tasks (creates/modifies union overlap). Uses O(n) Set lookups.
+ */
+export function hasSessionFileConflict(a: Session, b: Session): boolean {
+  const filesA = new Set<string>();
+  for (const task of a.tasks) {
+    for (const f of task.creates) filesA.add(f);
+    for (const f of task.modifies) filesA.add(f);
+  }
+  for (const task of b.tasks) {
+    for (const f of task.creates) {
+      if (filesA.has(f)) return true;
+    }
+    for (const f of task.modifies) {
+      if (filesA.has(f)) return true;
+    }
+  }
+  return false;
 }
 
 // ─── Topological Sort (Kahn's Algorithm) with File-Conflict Splitting ────────
