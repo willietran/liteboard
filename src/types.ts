@@ -52,6 +52,7 @@ export interface Task {
   modifies: string[];
   dependsOn: number[];
   requirements: string[];
+  explore: string[];
   tddPhase: TddPhase;
   commitMessage: string;
   complexity: number;

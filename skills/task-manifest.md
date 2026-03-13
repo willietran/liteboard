@@ -32,6 +32,9 @@ Each task must include:
   - Second requirement
     - Sub-detail
   - Third requirement
+- **Explore:**
+  - How the auth middleware validates tokens — for inserting PII redaction at the right pipeline stage
+  - What regex patterns exist — for detecting PII formats
 - **Type:** QA (or omit for implementation tasks)
 - **TDD Phase:** `RED`, `GREEN`, `REFACTOR` (or Exempt)
 - **Commit:** `task N: description`
@@ -49,6 +52,10 @@ Each task runs in an **isolated git worktree** that only contains code merged fr
 - Infer implicit dependencies: if Task B needs anything Task A produces to build, test, or run — files, packages, config, toolchains, project structure — B depends on A
 - **The worktree test**: for each task with `Depends on: (none)`, ask: "Could this task's agent succeed in a worktree containing only the repo's current main branch?" If not, it has a missing dependency
 - Ensure topologically valid ordering (no circular deps)
+
+### Explore Targets
+
+For each task, write 2-4 purpose-driven exploration targets. Each target should explain WHAT to look for and WHY it matters for this task. Omit for scaffolding tasks on brand-new projects where there's nothing to explore. These targets are passed directly to the Explore subagent — they should be specific questions, not generic directory listings.
 
 ### TDD Inference
 - **Default: TDD** for any task creating or modifying files with testable logic

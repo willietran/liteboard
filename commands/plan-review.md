@@ -6,10 +6,9 @@ Spawn an independent review subagent to evaluate the implementation plan before 
 
 1. Gather the following artifacts:
    - The implementation plan (step-by-step with verification commands)
-   - The design doc or task description
-   - The project manifest / relevant context files
+   - The design doc and task manifest (already included in this brief — reference them directly, do not re-read from disk)
 
-2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Instruct the reviewer: review by reading only — do not create files, scaffold projects, or install packages. Send it all three artifacts. Ask the reviewer to evaluate across these dimensions:
+2. Spawn a review subagent using the Agent tool with the model from the Sub-Agent Models section (Plan Review). Instruct the reviewer: review by reading only — do not create files, scaffold projects, or install packages. Send it the plan and relevant context from this brief. Ask the reviewer to evaluate across these dimensions:
    - **Alignment** — Does the plan address the full scope of the task and remain consistent with the design doc?
    - **Completeness** — Are there missing steps, unaddressed requirements, or gaps?
    - **Sequencing & isolation** — Are steps in the right order? Each task runs in an isolated worktree containing only its dependencies' merged output. Verify every task will have the imports, packages, and tooling it needs.

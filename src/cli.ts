@@ -230,6 +230,7 @@ async function main(): Promise<void> {
   const manifestPath = path.join(args.projectPath, "manifest.md");
   const designPath = path.join(args.projectPath, "design.md");
 
+
   // Load and merge config.json (before checkPrereqs so Ollama health check has config)
   const configPath = path.join(args.projectPath, "config.json");
   const projectConfig = parseProjectConfig(configPath);
@@ -257,6 +258,15 @@ async function main(): Promise<void> {
 
   await checkPrereqs(args);
   ensureGitignores(args.projectPath);
+
+  // Read docs once; pass inline content to all brief builders
+  const designDoc = fs.existsSync(designPath) ? fs.readFileSync(designPath, "utf-8") : "";
+  const manifestContent = fs.readFileSync(manifestPath, "utf-8");
+
+  // Warn if combined inline content is very large
+  if (designDoc.length + manifestContent.length > 100_000) {
+    log(`\x1b[33mWarning: inlined docs total ${Math.round((designDoc.length + manifestContent.length) / 1024)}KB — brief will be large\x1b[0m`);
+  }
 
   // Parse manifest
   const tasks = parseManifest(manifestPath);
@@ -486,7 +496,7 @@ async function main(): Promise<void> {
       task.provider = args.models.qa.provider;
       let child: ReturnType<typeof spawnAgent>;
       try {
-        const brief = buildBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+        const brief = buildBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
         const qaEnv = getProviderEnv(args.models.qa.provider, args.ollama);
         child = spawnAgent(task, brief, provider, args.models.qa.model, wp, args.projectPath, args.verbose, qaEnv);
         task.process = child;
@@ -512,7 +522,7 @@ async function main(): Promise<void> {
       task.provider = args.models.implementation.provider;
       let child: ReturnType<typeof spawnAgent>;
       try {
-        const brief = buildImplementationBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+        const brief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
         const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
         child = spawnAgent(task, brief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
         task.process = child;
@@ -537,7 +547,7 @@ async function main(): Promise<void> {
     task.provider = args.models.architect.provider;
     let architectChild: ReturnType<typeof spawnAgent>;
     try {
-      const architectBrief = buildArchitectBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+      const architectBrief = buildArchitectBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
       const architectEnv = getProviderEnv(args.models.architect.provider, args.ollama);
       architectChild = spawnAgent(task, architectBrief, provider, args.models.architect.model, wp, args.projectPath, args.verbose, architectEnv);
       task.process = architectChild;
@@ -594,7 +604,7 @@ async function main(): Promise<void> {
         // Phase 2: Implementation
         task.provider = args.models.implementation.provider;
         try {
-          const implBrief = buildImplementationBrief(task, filteredTasks, args.projectPath, designPath, manifestPath, args.branch, args.models, provider);
+          const implBrief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
           const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
           const implChild = spawnAgent(task, implBrief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
           task.process = implChild; // Dashboard + stall detection now tracks implementation process

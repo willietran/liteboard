@@ -29,29 +29,31 @@ function parseDependsOn(section: string): number[] {
   return [...taskRefs].map((m) => Number(m[1]));
 }
 
-function parseRequirements(section: string): string[] {
-  const headerMatch = section.match(/\*\*Requirements:\*\*/i);
+/** Parses a bullet list after a bold **Header:** marker. Stops at the next bold field or ### header. */
+function parseBulletList(section: string, header: string): string[] {
+  const headerMatch = section.match(new RegExp(`\\*\\*${header}:\\*\\*`, "i"));
   if (!headerMatch) return [];
 
-  const afterHeader = section.slice(
-    headerMatch.index! + headerMatch[0].length,
-  );
-
-  const requirements: string[] = [];
+  const afterHeader = section.slice(headerMatch.index! + headerMatch[0].length);
+  const items: string[] = [];
   const lines = afterHeader.split("\n");
 
   for (const line of lines) {
     // Stop at the next bold field or section header
     if (/^\*\*\w/.test(line.trim()) || /^###\s/.test(line.trim())) break;
-
-    // Match bullet lines (top-level or sub-bullets)
     const bulletMatch = line.match(/^\s*[-*]\s+(.+)/);
-    if (bulletMatch) {
-      requirements.push(bulletMatch[1].trim());
-    }
+    if (bulletMatch) items.push(bulletMatch[1].trim());
   }
 
-  return requirements;
+  return items;
+}
+
+function parseRequirements(section: string): string[] {
+  return parseBulletList(section, "Requirements");
+}
+
+function parseExplore(section: string): string[] {
+  return parseBulletList(section, "Explore");
 }
 
 function parseSingleValue(section: string, field: string): string {
@@ -107,6 +109,7 @@ export function parseManifest(manifestPath: string): Task[] {
       modifies: parseFileList(section, "Modifies"),
       dependsOn,
       requirements: parseRequirements(section),
+      explore: parseExplore(section),
       tddPhase: normalizeTddPhase(parseSingleValue(section, "TDD Phase")),
       commitMessage: parseSingleValue(section, "Commit"),
       complexity: isNaN(complexity) ? 0 : complexity,

@@ -82,6 +82,21 @@ function appendMemorySnapshot(parts: string[], projectDir: string): void {
   }
 }
 
+function appendInlineDocs(parts: string[], designDoc: string, manifest: string): void {
+  if (designDoc) {
+    parts.push("## Design Document");
+    parts.push("");
+    parts.push(designDoc.trim());
+    parts.push("");
+  }
+  if (manifest) {
+    parts.push("## Task Manifest");
+    parts.push("");
+    parts.push(manifest.trim());
+    parts.push("");
+  }
+}
+
 function appendTaskDetails(parts: string[], task: Task): void {
   parts.push("**Task details:**");
   if (task.creates.length > 0)
@@ -101,16 +116,16 @@ export function buildBrief(
   task: Task,
   allTasks: Task[],
   projectDir: string,
-  designPath: string,
-  manifestPath: string,
+  designDoc: string,
+  manifest: string,
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
 ): string {
   if (task.type === "qa") {
-    return buildQABrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, models, provider);
+    return buildQABrief(task, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
   }
-  return buildImplementationBrief(task, allTasks, projectDir, designPath, manifestPath, featureBranch, models, provider);
+  return buildImplementationBrief(task, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
 }
 
 // ─── Architect Brief ─────────────────────────────────────────────────────────
@@ -119,8 +134,8 @@ export function buildArchitectBrief(
   task: Task,
   allTasks: Task[],
   projectDir: string,
-  designPath: string,
-  manifestPath: string,
+  designDoc: string,
+  manifest: string,
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
@@ -129,6 +144,7 @@ export function buildArchitectBrief(
   const artDir = artifactsDir(projectDir);
   const parts: string[] = [];
 
+  // SHARED prefix (cache-friendly):
   // 1. Architect orientation
   parts.push(readCommand("architect-orientation.md"));
   parts.push("");
@@ -143,32 +159,7 @@ export function buildArchitectBrief(
   parts.push(readCommand("quality-standards.md"));
   parts.push("");
 
-  // 4. Task context
-  parts.push("---");
-  parts.push(`I'm planning **Task ${task.id}: ${task.title}** for the **${slug}** project.`);
-  parts.push("");
-
-  // 5. Reference docs
-  parts.push("**Reference documents** (read these first):");
-  parts.push(`- Design doc: \`${designPath}\``);
-  parts.push(`- Task manifest: \`${manifestPath}\``);
-  parts.push("");
-
-  // 6. Memory snapshot
-  appendMemorySnapshot(parts, projectDir);
-
-  // 7. Explore hints
-  const hints = inferExploreHints(task, allTasks);
-  if (hints.length > 0) {
-    parts.push("**Explore hints:**");
-    for (const h of hints) parts.push(`- ${h}`);
-    parts.push("");
-  }
-
-  // 8. Task details
-  appendTaskDetails(parts, task);
-
-  // 9. Workflow: plan review with supporting documents
+  // 4. Workflow: plan review with supporting documents
   parts.push("---");
   parts.push("## Workflow");
   parts.push("");
@@ -179,12 +170,37 @@ export function buildArchitectBrief(
   parts.push(readCommand("receiving-code-review.md"));
   parts.push("");
 
-  // 10. Plan output instruction
+  // 5. Design doc (inlined)
+  // 6. Manifest (inlined)
+  appendInlineDocs(parts, designDoc, manifest);
+
+  // --- cache boundary ---
+  // TASK-SPECIFIC:
+  // 7. Task context
+  parts.push("---");
+  parts.push(`I'm planning **Task ${task.id}: ${task.title}** for the **${slug}** project.`);
+  parts.push("");
+
+  // 8. Memory snapshot
+  appendMemorySnapshot(parts, projectDir);
+
+  // 9. Explore targets
+  const exploreTargets = task.explore.length > 0 ? task.explore : inferExploreHints(task, allTasks);
+  if (exploreTargets.length > 0) {
+    parts.push("**Explore targets:**");
+    for (const t of exploreTargets) parts.push(`- ${t}`);
+    parts.push("");
+  }
+
+  // 10. Task details
+  appendTaskDetails(parts, task);
+
+  // 11. Plan output instruction
   parts.push("### Plan Output");
   parts.push(`Write your approved plan to \`${artDir}/t${task.id}-task-plan.md\`.`);
   parts.push("");
 
-  // 11. Rules
+  // 12. Rules
   parts.push("---");
   parts.push("## Rules");
   parts.push(`- **Feature branch**: \`${featureBranch}\``);
@@ -205,8 +221,8 @@ export function buildImplementationBrief(
   task: Task,
   allTasks: Task[],
   projectDir: string,
-  designPath: string,
-  manifestPath: string,
+  designDoc: string,
+  manifest: string,
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
@@ -215,6 +231,7 @@ export function buildImplementationBrief(
   const artDir = artifactsDir(projectDir);
   const parts: string[] = [];
 
+  // SHARED prefix (cache-friendly):
   // 1. Agent orientation (implement/verify/review phases)
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
@@ -228,31 +245,11 @@ export function buildImplementationBrief(
   parts.push(readCommand("quality-standards.md"));
   parts.push("");
 
-  // 4. Task context
-  parts.push("---");
-  parts.push(`I'm implementing **Task ${task.id}: ${task.title}** for the **${slug}** project.`);
+  // 4. Shell anti-patterns
+  parts.push(readCommand("shell-anti-patterns.md"));
   parts.push("");
 
-  // 5. Reference docs
-  parts.push("**Reference documents** (read these first):");
-  parts.push(`- Design doc: \`${designPath}\``);
-  parts.push(`- Task manifest: \`${manifestPath}\``);
-  parts.push("");
-
-  // 6. Plan read instruction (only when architect phase produced a plan)
-  if (task.complexity > LOW_COMPLEXITY_THRESHOLD) {
-    parts.push(`**Task plan** (read before implementing):`);
-    parts.push(`- Read the approved plan from \`${artDir}/t${task.id}-task-plan.md\``);
-    parts.push("");
-  }
-
-  // 7. Memory snapshot
-  appendMemorySnapshot(parts, projectDir);
-
-  // 8. Task details
-  appendTaskDetails(parts, task);
-
-  // 9. Workflow: implement → verify → code review
+  // 5. Workflow: implement → verify → code review
   parts.push("---");
   parts.push("## Workflow");
   parts.push("");
@@ -276,7 +273,31 @@ export function buildImplementationBrief(
   parts.push(readCommand("code-reviewer.md"));
   parts.push("");
 
-  // 10. Commit message + rules
+  // 6. Design doc (inlined)
+  // 7. Manifest (inlined)
+  appendInlineDocs(parts, designDoc, manifest);
+
+  // --- cache boundary ---
+  // TASK-SPECIFIC:
+  // 8. Task context
+  parts.push("---");
+  parts.push(`I'm implementing **Task ${task.id}: ${task.title}** for the **${slug}** project.`);
+  parts.push("");
+
+  // 9. Plan read instruction (only when architect phase produced a plan)
+  if (task.complexity > LOW_COMPLEXITY_THRESHOLD) {
+    parts.push(`**Task plan** (read before implementing):`);
+    parts.push(`- Read the approved plan from \`${artDir}/t${task.id}-task-plan.md\``);
+    parts.push("");
+  }
+
+  // 10. Memory snapshot
+  appendMemorySnapshot(parts, projectDir);
+
+  // 11. Task details
+  appendTaskDetails(parts, task);
+
+  // 12. Commit message + rules
   parts.push("---");
   parts.push("## Rules");
   parts.push(`- **Commit message** (use exactly): \`${task.commitMessage}\``);
@@ -296,8 +317,8 @@ function buildQABrief(
   task: Task,
   allTasks: Task[],
   projectDir: string,
-  designPath: string,
-  manifestPath: string,
+  designDoc: string,
+  manifest: string,
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
@@ -305,6 +326,7 @@ function buildQABrief(
   const slug = path.basename(projectDir);
   const parts: string[] = [];
 
+  // SHARED prefix (cache-friendly):
   // 1. Agent orientation + quality standards
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
@@ -314,24 +336,36 @@ function buildQABrief(
     { name: "Fixer", model: models?.qa.subagents.qaFixer?.model ?? "" },
   ], models?.qa.provider ?? "claude", models, provider);
 
+  // 3. Quality standards
   parts.push(readCommand("quality-standards.md"));
   parts.push("");
 
-  // 3. Task context
+  // 4. Shell anti-patterns
+  parts.push(readCommand("shell-anti-patterns.md"));
+  parts.push("");
+
+  // 5. QA workflow
+  parts.push("---");
+  parts.push("## Workflow");
+  parts.push("");
+  parts.push(readCommand("qa-agent.md"));
+  parts.push("");
+
+  // 6. Design doc (inlined)
+  // 7. Manifest (inlined)
+  appendInlineDocs(parts, designDoc, manifest);
+
+  // --- cache boundary ---
+  // TASK-SPECIFIC:
+  // 8. Task context
   parts.push("---");
   parts.push(`I'm the **QA agent** for **Task ${task.id}: ${task.title}** in the **${slug}** project.`);
   parts.push("");
 
-  // 4. Reference docs
-  parts.push("**Reference documents** (read these first):");
-  parts.push(`- Design doc: \`${designPath}\``);
-  parts.push(`- Task manifest: \`${manifestPath}\``);
-  parts.push("");
-
-  // 5. Memory snapshot
+  // 9. Memory snapshot
   appendMemorySnapshot(parts, projectDir);
 
-  // 6. Dependency task details
+  // 10. Dependency task details
   const depTasks = task.dependsOn
     .map(id => allTasks.find(t => t.id === id))
     .filter((t): t is Task => t !== undefined);
@@ -357,14 +391,7 @@ function buildQABrief(
     }
   }
 
-  // 7. QA workflow
-  parts.push("---");
-  parts.push("## Workflow");
-  parts.push("");
-  parts.push(readCommand("qa-agent.md"));
-  parts.push("");
-
-  // 8. Rules
+  // 11. Rules
   parts.push("---");
   parts.push("## Rules");
   parts.push(`- **Commit message** (use exactly): \`${task.commitMessage}\``);
