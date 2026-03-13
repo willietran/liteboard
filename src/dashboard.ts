@@ -159,8 +159,16 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
       + CLEAR_BELOW;
     process.stdout.write(output);
   } else {
-    const allLines = [...headerLines, ...runningLines, ...summaryLines, ...failedLines, ...footerLines];
-    for (const line of allLines) {
+    // Pipe mode: reorder for tail-view (Claude Code viewer shows last N lines).
+    // Progress bar goes last so it's always visible. Blank separators filtered out.
+    const pipeLines = [
+      ...footerLines,
+      ...runningLines,
+      ...summaryLines,
+      ...failedLines,
+      ...headerLines,
+    ].filter(l => l !== "");
+    for (const line of pipeLines) {
       console.log(line);
     }
   }
