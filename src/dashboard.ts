@@ -10,6 +10,13 @@ const CLEAR_TO_EOL = "\x1b[K";
 const CLEAR_BELOW = "\x1b[J";
 
 let forcePipeMode = false;
+let lastPipeStateKey = "";
+
+function pipeStateKey(tasks: Task[]): string {
+  return tasks
+    .map(t => `${t.id}:${t.status}:${t.turnCount}:${t.bytesReceived}:${t.stage ?? ""}:${t.lastLine ?? ""}`)
+    .join("|");
+}
 
 export function setForcePipeMode(value: boolean): void {
   forcePipeMode = value;
@@ -168,8 +175,18 @@ export function renderStatus(tasks: Task[], projectDir: string): void {
       ...failedLines,
       ...headerLines,
     ].filter(l => l !== "");
-    for (const line of pipeLines) {
-      console.log(line);
+    const key = pipeStateKey(tasks);
+    if (key !== lastPipeStateKey) {
+      const isFirstEmission = lastPipeStateKey === "";
+      lastPipeStateKey = key;
+      // Emit blank lines before each frame after the first to push the previous
+      // frame above the Claude Code viewer's visible window (~9 lines).
+      if (!isFirstEmission) {
+        for (let i = 0; i < 10; i++) console.log("");
+      }
+      for (const line of pipeLines) {
+        console.log(line);
+      }
     }
   }
 }
