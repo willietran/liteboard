@@ -520,41 +520,18 @@ describe("squashMerge — dirty index guard", () => {
   });
 });
 
-// ─── git clean -fd after reset --hard ─────────────────────────────────────────
+// ─── no git clean -fd in main repo ────────────────────────────────────────────
 
-describe("squashMerge — git clean -fd after reset --hard", () => {
-  it("calls git clean -fd after reset --hard in abortAndRecover", () => {
-    abortAndRecover("feat/x", false);
-
-    const calls = gitCalls();
-    const resetIdx = calls.findIndex(c => c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
-    expect(resetIdx).toBeGreaterThan(-1);
-
-    const cleanIdx = calls.findIndex((c, i) => i > resetIdx && c[0] === "clean" && c[1] === "-fd");
-    expect(cleanIdx).toBeGreaterThan(resetIdx);
-  });
-
-  it("calls git clean -fd after reset --hard in dirty index guard", async () => {
-    mockExec.mockImplementation((cmd, args) => {
-      const a = args as string[];
-      if (cmd === "git" && a[0] === "status" && a[1] === "--porcelain") {
-        return "M  src/dirty.ts";
-      }
-      return "";
-    });
-
+describe("squashMerge — no git clean -fd in main repo", () => {
+  it("does not call git clean -fd (would nuke untracked project files)", async () => {
     await squashMerge(1, "proj", "feat/x", "feat: test", false);
 
     const calls = gitCalls();
-    const statusIdx = calls.findIndex(c => c[0] === "status" && c[1] === "--porcelain");
-    const resetIdx = calls.findIndex((c, i) => i > statusIdx && c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
-    expect(resetIdx).toBeGreaterThan(statusIdx);
-
-    const cleanIdx = calls.findIndex((c, i) => i > resetIdx && c[0] === "clean" && c[1] === "-fd");
-    expect(cleanIdx).toBeGreaterThan(resetIdx);
+    const cleanCalls = calls.filter(c => c[0] === "clean" && c[1] === "-fd");
+    expect(cleanCalls).toHaveLength(0);
   });
 
-  it("calls git clean -fd after reset --hard on build failure (resetAndThrow)", async () => {
+  it("does not call git clean -fd on build failure", async () => {
     mockRunBuildValidation.mockReturnValue({
       success: false,
       failedPhase: "build",
@@ -569,78 +546,15 @@ describe("squashMerge — git clean -fd after reset --hard", () => {
 
     const calls = gitCalls();
     const cleanCalls = calls.filter(c => c[0] === "clean" && c[1] === "-fd");
-    expect(cleanCalls.length).toBeGreaterThanOrEqual(1);
+    expect(cleanCalls).toHaveLength(0);
   });
 
-  it("calls git clean -fd after reset --hard in outer catch", async () => {
-    mockRunBuildValidation.mockReturnValue({
-      success: false,
-      failedPhase: "build",
-      error: "build failed",
-      stderr: "tsc error",
-      tscErrorCount: 1,
-      testFailCount: 0,
-      testPassCount: 0,
-    });
-
-    await expect(squashMerge(5, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
-
-    const calls = gitCalls();
-    const lastReset = calls.findLastIndex(c => c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
-    const lastClean = calls.findLastIndex(c => c[0] === "clean" && c[1] === "-fd");
-    expect(lastClean).toBeGreaterThan(lastReset);
-  });
-
-  it("calls git clean -fd after reset --hard in non-package conflict resolution", async () => {
-    let mergeAttempt = 0;
-
-    mockExec.mockImplementation((cmd, args) => {
-      const a = args as string[];
-      if (cmd === "git" && a[0] === "merge" && a[1] === "--squash") {
-        mergeAttempt++;
-        if (mergeAttempt === 1) throw new Error("merge conflict");
-        return "";
-      }
-      if (cmd === "git" && a[0] === "diff" && a.includes("--diff-filter=U")) {
-        return "src/index.ts";
-      }
-      if (cmd === "git" && a[0] === "merge" && a[1] === "--abort") {
-        throw new Error("fatal: There is no merge to abort (MERGE_HEAD missing)");
-      }
-      return "";
-    });
-
-    await squashMerge(6, "proj", "feat/x", "feat: widget", false);
-
-    const calls = gitCalls();
-    const firstMergeSquashIdx = calls.findIndex(c => c[0] === "merge" && c[1] === "--squash");
-    const resetIdx = calls.findIndex((c, i) => i > firstMergeSquashIdx && c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD");
-    expect(resetIdx).toBeGreaterThan(firstMergeSquashIdx);
-
-    const cleanIdx = calls.findIndex((c, i) => i > resetIdx && c[0] === "clean" && c[1] === "-fd");
-    expect(cleanIdx).toBeGreaterThan(resetIdx);
-  });
-
-  it("calls git clean -fd after reset --hard in resolveErr catch", async () => {
-    let mergeAttempt = 0;
-
-    mockExec.mockImplementation((cmd, args) => {
-      const a = args as string[];
-      if (cmd === "git" && a[0] === "merge" && a[1] === "--squash") {
-        mergeAttempt++;
-        throw new Error("merge conflict");
-      }
-      if (cmd === "git" && a[0] === "diff" && a.includes("--diff-filter=U")) {
-        throw new Error("diff failed");
-      }
-      return "";
-    });
-
-    await expect(squashMerge(3, "proj", "feat/x", "feat: bad", false)).rejects.toThrow();
+  it("does not call git clean -fd in abortAndRecover", () => {
+    abortAndRecover("feat/x", false);
 
     const calls = gitCalls();
     const cleanCalls = calls.filter(c => c[0] === "clean" && c[1] === "-fd");
-    expect(cleanCalls.length).toBeGreaterThanOrEqual(1);
+    expect(cleanCalls).toHaveLength(0);
   });
 });
 

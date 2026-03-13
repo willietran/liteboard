@@ -20,7 +20,6 @@ function resetAndThrow(
 ): never {
   try {
     git(["reset", "--hard", "HEAD"], { verbose });
-    git(["clean", "-fd"], { verbose });
   } catch (resetErr) {
     console.error(`[merger] git reset also failed for task ${taskId}: ${getErrorMessage(resetErr)}`);
   }
@@ -61,7 +60,6 @@ export async function squashMerge(
         console.error(`[merger] dirty index detected before merge for task ${taskId}, resetting`);
         try { git(["merge", "--abort"], { verbose }); } catch {}
         try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
-        try { git(["clean", "-fd"], { verbose }); } catch {}
       }
 
       // Resolve repo root so npm commands run from the right directory
@@ -87,7 +85,6 @@ export async function squashMerge(
           // --squash does not create MERGE_HEAD, so merge --abort won't work.
           // reset --hard restores the feature branch to its pre-merge state.
           git(["reset", "--hard", "HEAD"], { verbose });
-          git(["clean", "-fd"], { verbose });
 
           // Squash task branch to a single commit
           git(["checkout", taskBranch], { verbose });
@@ -111,7 +108,6 @@ export async function squashMerge(
           try {
             git(["reset", "--hard", "HEAD"], { verbose });
           } catch {}
-          try { git(["clean", "-fd"], { verbose }); } catch {}
           try {
             git(["checkout", featureBranch], { verbose });
           } catch {}
@@ -158,7 +154,6 @@ export async function squashMerge(
       try { git(["merge", "--abort"], { verbose }); } catch {}
       try { git(["checkout", featureBranch], { verbose }); } catch {}
       try { git(["reset", "--hard", "HEAD"], { verbose }); } catch {}
-      try { git(["clean", "-fd"], { verbose }); } catch {}
       throw e;
     }
   });
@@ -179,5 +174,4 @@ export function abortAndRecover(
   try {
     git(["reset", "--hard", "HEAD"], { verbose });
   } catch {}
-  try { git(["clean", "-fd"], { verbose }); } catch {}
 }

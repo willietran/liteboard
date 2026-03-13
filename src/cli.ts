@@ -278,6 +278,8 @@ async function main(): Promise<void> {
   if (tasks.length === 0) die("No tasks found in manifest.");
 
   // Apply task filter
+  // allTasks retains the full manifest for progress writes; filteredTasks drives scheduling.
+  const allTasks = tasks;
   let filteredTasks = tasks;
   if (args.taskFilter) {
     const filterSet = new Set(args.taskFilter);
@@ -317,9 +319,9 @@ async function main(): Promise<void> {
 
   // Resume detection
   const previousProgress = readProgress(args.projectPath);
-  const gitCompleted = detectCompletedFromGitLog(args.branch, filteredTasks, args.verbose);
+  const gitCompleted = detectCompletedFromGitLog(args.branch, allTasks, args.verbose);
 
-  for (const t of filteredTasks) {
+  for (const t of allTasks) {
     const progressValue = previousProgress.get(t.id);
     if (progressValue === "needs_human") {
       t.status = "needs_human";
@@ -563,7 +565,7 @@ async function main(): Promise<void> {
       clearInterval(dashboardInterval);
       if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
       cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose, { preserveFailedBranches: true });
-      writeProgress(filteredTasks, args.projectPath);
+      writeProgress(allTasks, args.projectPath);
       process.exit(1);
     }, 10000);
   });
@@ -588,7 +590,7 @@ async function main(): Promise<void> {
       task.stage = "";
       task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
       cleanupWorktree(slug, task.id, args.branch, args.verbose);
-      writeProgress(filteredTasks, args.projectPath);
+      writeProgress(allTasks, args.projectPath);
       updateStatuses();
       return;
     }
@@ -610,7 +612,7 @@ async function main(): Promise<void> {
           }
         }
         cleanupAfterTriage(task);
-        writeProgress(filteredTasks, args.projectPath);
+        writeProgress(allTasks, args.projectPath);
         updateStatuses();
         activePromises.delete(task.id);
         resolve();
@@ -699,7 +701,7 @@ async function main(): Promise<void> {
         cleanupAfterTriage(task);
       }
 
-      writeProgress(filteredTasks, args.projectPath);
+      writeProgress(allTasks, args.projectPath);
       updateStatuses();
       activePromises.delete(task.id);
       resolve();
@@ -719,7 +721,7 @@ async function main(): Promise<void> {
         task.stage = "";
         task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
         cleanupWorktree(slug, task.id, args.branch, args.verbose);
-        writeProgress(filteredTasks, args.projectPath);
+        writeProgress(allTasks, args.projectPath);
         updateStatuses();
         return;
       }
@@ -745,7 +747,7 @@ async function main(): Promise<void> {
         task.stage = "";
         task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
         cleanupWorktree(slug, task.id, args.branch, args.verbose);
-        writeProgress(filteredTasks, args.projectPath);
+        writeProgress(allTasks, args.projectPath);
         updateStatuses();
         return;
       }
@@ -778,7 +780,7 @@ async function main(): Promise<void> {
         task.stage = "";
         task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
         cleanupWorktree(slug, task.id, args.branch, args.verbose);
-        writeProgress(filteredTasks, args.projectPath);
+        writeProgress(allTasks, args.projectPath);
         updateStatuses();
         return;
       }
@@ -803,7 +805,7 @@ async function main(): Promise<void> {
       task.stage = "";
       task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
       cleanupWorktree(slug, task.id, args.branch, args.verbose);
-      writeProgress(filteredTasks, args.projectPath);
+      writeProgress(allTasks, args.projectPath);
       updateStatuses();
       return;
     }
@@ -819,7 +821,7 @@ async function main(): Promise<void> {
             slug, args.branch, args.projectPath, filteredTasks, args.verbose,
           );
           cleanupAfterTriage(task);
-          writeProgress(filteredTasks, args.projectPath);
+          writeProgress(allTasks, args.projectPath);
           updateStatuses();
           activePromises.delete(task.id);
           resolve();
@@ -837,7 +839,7 @@ async function main(): Promise<void> {
             log(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
           }
           cleanupAfterTriage(task);
-          writeProgress(filteredTasks, args.projectPath);
+          writeProgress(allTasks, args.projectPath);
           updateStatuses();
           activePromises.delete(task.id);
           resolve();
@@ -856,7 +858,7 @@ async function main(): Promise<void> {
             log(`[triage] Triage failed for T${task.id}: ${triageErr instanceof Error ? triageErr.message : String(triageErr)}`);
           }
           cleanupAfterTriage(task);
-          writeProgress(filteredTasks, args.projectPath);
+          writeProgress(allTasks, args.projectPath);
           updateStatuses();
           activePromises.delete(task.id);
           resolve();
@@ -890,7 +892,7 @@ async function main(): Promise<void> {
           task.stage = "";
           task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
           cleanupWorktree(slug, task.id, args.branch, args.verbose);
-          writeProgress(filteredTasks, args.projectPath);
+          writeProgress(allTasks, args.projectPath);
           updateStatuses();
           activePromises.delete(task.id);
           resolve();
@@ -949,7 +951,7 @@ async function main(): Promise<void> {
           cleanupAfterTriage(task);
         }
 
-        writeProgress(filteredTasks, args.projectPath);
+        writeProgress(allTasks, args.projectPath);
         updateStatuses();
         activePromises.delete(task.id);
       })();
@@ -999,7 +1001,7 @@ async function main(): Promise<void> {
       }
     }
 
-    writeProgress(filteredTasks, args.projectPath);
+    writeProgress(allTasks, args.projectPath);
 
     // Wait a bit before next iteration
     await new Promise(r => setTimeout(r, 2000));
