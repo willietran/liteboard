@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { existsSync, readFileSync, appendFileSync, writeFileSync, renameSync } from "node:fs";
+import { spawn } from "node:child_process";
 import * as path from "node:path";
 import type {
   Session,
@@ -12,16 +12,21 @@ import type {
   ErrorClass,
   ProjectConfig,
 } from "./types.js";
+import { DEFAULT_TRIAGE_MODEL } from "./types.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
 import { getRecentOutput, extendStallTimeout } from "./spawner.js";
 import { getWorktreePath, cleanupWorktree, recreateWorktreeFromBranch } from "./worktree.js";
+import { getProviderEnv } from "./provider.js";
 import { createMutex } from "./mutex.js";
+import { getErrorMessage } from "./errors.js";
+import { writeWithMkdir } from "./fs-helpers.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 export const MAX_TRIAGE_ATTEMPTS = 3;
 export const MAX_ERROR_TAIL_LENGTH = 4000;
+const ERROR_TAIL_LINES = 30;
 
 const VALID_ACTIONS: ReadonlySet<string> = new Set<TriageAction>([
   "retry_from_scratch",
@@ -82,18 +87,12 @@ const serializeTriage = createMutex();
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
-/** Shared ENOENT → mkdir → retry pattern for file writes. */
-function writeWithMkdir(filePath: string, writeFn: () => void): void {
-  try {
-    writeFn();
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-      mkdirSync(path.dirname(filePath), { recursive: true });
-      writeFn();
-    } else {
-      throw e;
-    }
-  }
+/** Count how many other sessions depend on tasks in the given session. */
+function countBlockedDownstream(session: Session, allSessions: Session[]): number {
+  const sessionTaskIds = new Set(session.tasks.map((t) => t.id));
+  return allSessions.filter((s) =>
+    s !== session && s.tasks.some((t) => t.dependsOn.some((dep) => sessionTaskIds.has(dep))),
+  ).length;
 }
 
 // ─── extractReadableLines ─────────────────────────────────────────────────────
@@ -144,7 +143,7 @@ export function parseTriageResponse(stdout: string): TriageDecision {
   try {
     parsed = JSON.parse(jsonMatch[0]);
   } catch (e) {
-    return escalate(`Invalid JSON: ${(e as Error).message}`);
+    return escalate(`Invalid JSON: ${getErrorMessage(e)}`);
   }
 
   if (typeof parsed !== "object" || parsed === null) {
@@ -312,7 +311,11 @@ ${decision.reasoning}
 4. Re-run with \`--resume\` after fixing the underlying issue
 `;
 
-  writeWithMkdir(filePath, () => writeFileSync(filePath, content, "utf-8"));
+  const tmpPath = filePath + ".tmp";
+  writeWithMkdir(filePath, () => {
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, filePath);
+  });
 }
 
 // ─── buildTriagePrompt ────────────────────────────────────────────────────────
@@ -380,13 +383,14 @@ export async function gatherDecisionContext(
   projectDir: string,
   concurrencyLimit: number,
   trigger: { stage: FailureStage; exitCode: number; errorClass?: ErrorClass },
+  slug: string,
+  verbose: boolean,
 ): Promise<DecisionContext> {
-  const slug = path.basename(projectDir);
   const sessionBranch = session.branchName ?? `${featureBranch}-s${session.id}`;
   const wtPath = session.worktreePath ?? getWorktreePath(slug, session.id);
 
   // ── Branch state ──────────────────────────────────────────────────────────
-  const branchListResult = git(["branch", "--list", sessionBranch]);
+  const branchListResult = git(["branch", "--list", sessionBranch], { verbose });
   const branchExists = branchListResult.length > 0;
 
   let commitsAhead = 0;
@@ -394,14 +398,14 @@ export async function gatherDecisionContext(
   if (branchExists) {
     try {
       commitsAhead = parseInt(
-        git(["rev-list", "--count", `${featureBranch}..${sessionBranch}`]),
+        git(["rev-list", "--count", `${featureBranch}..${sessionBranch}`], { verbose }),
         10,
       );
     } catch {
       commitsAhead = 0;
     }
     try {
-      diffStat = git(["diff", "--stat", `${featureBranch}..${sessionBranch}`]);
+      diffStat = git(["diff", "--stat", `${featureBranch}..${sessionBranch}`], { verbose });
     } catch {
       diffStat = "";
     }
@@ -412,7 +416,7 @@ export async function gatherDecisionContext(
   let worktreeClean = false;
   if (worktreeExists) {
     try {
-      const status = git(["status", "--porcelain"], { cwd: wtPath });
+      const status = git(["status", "--porcelain"], { cwd: wtPath, verbose });
       worktreeClean = status.length === 0;
     } catch {
       worktreeClean = false;
@@ -432,7 +436,7 @@ export async function gatherDecisionContext(
     errorTail = extractReadableLines(recentOutput).join("\n");
   } else if (session.logPath && existsSync(session.logPath)) {
     const content = readFileSync(session.logPath, "utf-8");
-    const rawLines = content.split("\n").slice(-30);
+    const rawLines = content.split("\n").slice(-ERROR_TAIL_LINES);
     errorTail = extractReadableLines(rawLines).join("\n");
   } else {
     errorTail = "";
@@ -446,18 +450,14 @@ export async function gatherDecisionContext(
   const runningSessions = allSessions.filter((s) => s.status === "running").length;
   const freeSlots = concurrencyLimit - runningSessions;
 
-  // A session is blocked downstream if any of its tasks depend on any task in this session.
-  const sessionTaskIds = new Set(session.tasks.map((t) => t.id));
-  const blockedDownstream = allSessions.filter((s) =>
-    s !== session && s.tasks.some((t) => t.dependsOn.some((dep) => sessionTaskIds.has(dep))),
-  ).length;
+  const blockedDownstream = countBlockedDownstream(session, allSessions);
 
   // Populate task field from the first task in the session (representative context).
   const representativeTask = session.tasks[0] ?? {
     id: 0,
     title: session.focus,
     type: undefined,
-    tddPhase: "" as const,
+    tddPhase: "",
     complexity: session.complexity,
     requirements: [],
     creates: [],
@@ -508,21 +508,40 @@ export async function gatherDecisionContext(
 // ─── spawnTriageAgent ─────────────────────────────────────────────────────────
 
 /** Spawn short-lived `claude -p` for triage. Returns stdout. */
-function spawnTriageAgent(prompt: string, model: string): Promise<string> {
+function spawnTriageAgent(prompt: string, model: string, providerEnv?: Record<string, string>): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    execFile(
+    // Clone env and strip CLAUDECODE to prevent recursive invocation (defense-in-depth, matches provider.ts)
+    const env = { ...process.env, ...providerEnv };
+    delete env.CLAUDECODE;
+
+    const child = spawn(
       "claude",
       ["-p", prompt, "--model", model, "--output-format", "text", "--max-turns", "1"],
       {
         timeout: 30_000,
-        encoding: "utf-8",
-        env: { ...process.env, CLAUDE_CODE_MAX_TURNS: "1" },
-      },
-      (error, stdout) => {
-        if (error) reject(error);
-        else resolve(stdout);
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
       },
     );
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout!.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf-8");
+    });
+    child.stderr!.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf-8");
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        const detail = stderr ? `: ${stderr.slice(0, 200)}` : "";
+        reject(new Error(`triage agent exited with code ${code}${detail}`));
+      } else {
+        resolve(stdout);
+      }
+    });
   });
 }
 
@@ -543,10 +562,11 @@ export async function askTriage(
 
   return serializeTriage(async () => {
     const prompt = buildTriagePrompt(context);
-    const model = config.triage?.model ?? "claude-sonnet-4-6";
+    const model = config.triage?.model ?? DEFAULT_TRIAGE_MODEL;
+    const providerEnv = getProviderEnv(config.triage?.provider ?? "claude", config.ollama);
 
     try {
-      const stdout = await spawnTriageAgent(prompt, model);
+      const stdout = await spawnTriageAgent(prompt, model, providerEnv);
       logTriageResponse(context.session.id, stdout, projectDir);
       const decision = parseTriageResponse(stdout);
 
@@ -561,7 +581,7 @@ export async function askTriage(
     } catch (error) {
       return {
         action: "escalate" as const,
-        reasoning: `Triage agent failed: ${(error as Error).message}`,
+        reasoning: `Triage agent failed: ${getErrorMessage(error)}`,
       };
     }
   });
@@ -624,10 +644,7 @@ export async function executeTriageAction(
       for (const t of session.tasks) {
         if (t.status !== "done") t.status = "done";
       }
-      const sessionTaskIds = new Set(session.tasks.map((t) => t.id));
-      const blockedCount = allSessions.filter((s) =>
-        s !== session && s.tasks.some((t) => t.dependsOn.some((dep) => sessionTaskIds.has(dep))),
-      ).length;
+      const blockedCount = countBlockedDownstream(session, allSessions);
       if (blockedCount > 0) {
         console.warn(
           `[triage] Session ${session.id} skipped with ${blockedCount} downstream session(s) blocked`,

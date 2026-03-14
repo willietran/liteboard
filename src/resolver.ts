@@ -6,6 +6,7 @@ import type { Task, Layer, Session } from "./types.js";
  * Returns true if tasks `a` and `b` touch any of the same files
  * (creates/modifies overlap in any combination).
  */
+/** @internal — only used by tests and internal splitConflicts; production code uses session-level variants. */
 export function hasFileConflict(a: Task, b: Task): boolean {
   const filesA = new Set([...a.creates, ...a.modifies]);
   const filesB = [...b.creates, ...b.modifies];
@@ -54,6 +55,7 @@ export function resolveSessionDependencies(sessions: Session[]): Map<string, str
  * and every dependency session has status "done". Sessions absent from the
  * deps map are treated as having no dependencies.
  */
+/** @internal — only used by tests; production code uses inline session-dep logic in cli.ts. */
 export function getReadySessions(sessions: Session[], deps: Map<string, string[]>): Session[] {
   if (sessions.length === 0) return [];
 
@@ -100,6 +102,7 @@ export function hasSessionFileConflict(a: Session, b: Session): boolean {
  *
  * Throws a descriptive error when a circular dependency is detected.
  */
+/** @internal — only used by tests; production code uses session-based scheduling. */
 export function topologicalSort(tasks: Task[]): Layer[] {
   if (tasks.length === 0) return [];
 

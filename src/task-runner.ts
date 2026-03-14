@@ -11,6 +11,7 @@ import type {
   DecisionContext,
   Provider,
   ProjectConfig,
+  SessionRunnerContext,
 } from "./types.js";
 import { LOW_COMPLEXITY_THRESHOLD } from "./types.js";
 import { writeProgress } from "./progress.js";
@@ -32,24 +33,6 @@ import {
 } from "./brief.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
-
-// ─── Session Runner Context ───────────────────────────────────────────────────
-
-export interface SessionRunnerContext {
-  args: CLIArgs;
-  slug: string;
-  filteredSessions: Session[];
-  allSessions: Session[];
-  allTasks: Task[];
-  designDoc: string;
-  manifestContent: string;
-  provider: Provider;
-  projectConfig: ProjectConfig;
-  activePromises: Map<string, Promise<void>>;
-  qaReports: Map<string, string>;
-  updateStatuses: () => void;
-  sessionDeps: Map<string, string[]>;
-}
 
 // ─── Module-Level State ──────────────────────────────────────────────────────
 
@@ -86,7 +69,7 @@ export async function invokeTriageForSession(
 ): Promise<void> {
   const context = await gatherDecisionContext(
     session, ctx.filteredSessions, ctx.args.branch, ctx.args.projectPath, ctx.args.concurrency,
-    { stage, exitCode, errorClass },
+    { stage, exitCode, errorClass }, ctx.slug, ctx.args.verbose,
   );
   const decision = await askTriage(context, ctx.args.projectPath, ctx.projectConfig);
   writeDecisionRecord(session.id, {
@@ -138,7 +121,7 @@ export async function handleStallCallback(ctx: SessionRunnerContext, session: Se
   try {
     const context = await gatherDecisionContext(
       session, ctx.filteredSessions, ctx.args.branch, ctx.args.projectPath, ctx.args.concurrency,
-      { stage: "stall", exitCode: -1, errorClass: "stall" },
+      { stage: "stall", exitCode: -1, errorClass: "stall" }, ctx.slug, ctx.args.verbose,
     );
     const decision = await askTriage(context, ctx.args.projectPath, ctx.projectConfig);
     writeDecisionRecord(session.id, {

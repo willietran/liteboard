@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Session, Task, CLIArgs } from "./types.js";
+import type { Session, Task, CLIArgs, SessionRunnerContext } from "./types.js";
 import { defaultModelConfig } from "./types.js";
 import { parseManifest, parseSessions } from "./parser.js";
 import { resolveSessionDependencies, hasSessionFileConflict } from "./resolver.js";
@@ -28,7 +28,6 @@ import { artifactsDir } from "./paths.js";
 import {
   spawnSession,
   handleMergingSession,
-  type SessionRunnerContext,
 } from "./task-runner.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -472,12 +471,18 @@ async function main(): Promise<void> {
 
   // Unblock sessions whose deps are all done
   function updateStatuses(): void {
+    // Build lookup maps for O(1) dep resolution
+    const taskById = new Map<number, Task>();
+    for (const t of allTasks) taskById.set(t.id, t);
+    const sessionById = new Map<string, Session>();
+    for (const s of filteredSessions) sessionById.set(s.id, s);
+
     // Update task statuses within sessions
     for (const s of filteredSessions) {
       for (const t of s.tasks) {
         if (t.status === "blocked") {
           const allDepsDone = t.dependsOn.every(depId => {
-            const dep = allTasks.find(x => x.id === depId);
+            const dep = taskById.get(depId);
             return dep?.status === "done";
           });
           if (allDepsDone) t.status = "queued";
@@ -490,7 +495,7 @@ async function main(): Promise<void> {
       if (s.status !== "queued" && s.status !== "blocked") continue;
       const deps = sessionDeps.get(s.id) ?? [];
       const allDepsDone = deps.every(depId => {
-        const dep = filteredSessions.find(x => x.id === depId);
+        const dep = sessionById.get(depId);
         return dep?.status === "done";
       });
       s.status = allDepsDone ? "queued" : "blocked";
@@ -559,7 +564,7 @@ async function main(): Promise<void> {
       try {
         const context = await gatherDecisionContext(
           session, filteredSessions, args.branch, args.projectPath, args.concurrency,
-          { stage: "startup_validation", exitCode: -1 },
+          { stage: "startup_validation", exitCode: -1 }, slug, args.verbose,
         );
         const decision = await askTriage(context, args.projectPath, projectConfig);
         writeDecisionRecord(session.id, {

@@ -86,8 +86,8 @@ import {
   cleanupAfterTriage,
   handleStallCallback,
   invokeTriageForSession,
-  type SessionRunnerContext,
 } from "../src/task-runner.js";
+import type { SessionRunnerContext } from "../src/types.js";
 import { writeProgress } from "../src/progress.js";
 import { cleanupWorktree } from "../src/worktree.js";
 import { gatherDecisionContext, askTriage, executeTriageAction, writeDecisionRecord } from "../src/triage.js";
@@ -409,6 +409,7 @@ describe("invokeTriageForSession", () => {
     expect(mockGatherDecisionContext).toHaveBeenCalledWith(
       session, [], "feat/x", "/test/project", 2,
       { stage: "implementation", exitCode: 1, errorClass: undefined },
+      "test-proj", false,
     );
     expect(mockAskTriage).toHaveBeenCalledWith(context, "/test/project", ctx.projectConfig);
     expect(mockWriteDecisionRecord).toHaveBeenCalledWith(
@@ -438,6 +439,7 @@ describe("invokeTriageForSession", () => {
     expect(mockGatherDecisionContext).toHaveBeenCalledWith(
       session, [], "feat/x", "/test/project", 2,
       { stage: "merge_conflict", exitCode: 1, errorClass: "git_conflict" },
+      "test-proj", false,
     );
   });
 
@@ -469,7 +471,7 @@ describe("invokeTriageForSession", () => {
 
     expect(mockGatherDecisionContext).toHaveBeenCalledWith(
       session1, [session1, session2], "feat/x", "/test/project", 2,
-      expect.any(Object),
+      expect.any(Object), "test-proj", false,
     );
   });
 
@@ -500,6 +502,7 @@ describe("invokeTriageForSession", () => {
     expect(mockGatherDecisionContext).toHaveBeenCalledWith(
       session, [], "feat/x", "/test/project", 2,
       { stage: "test_validation", exitCode: 1, errorClass: "test_failure" },
+      "test-proj", false,
     );
   });
 });

@@ -198,6 +198,7 @@ function appendTaskDetails(parts: string[], task: Task): void {
 
 // ─── Backward-Compatible Dispatcher ──────────────────────────────────────────
 
+/** @internal — only used by tests; production code uses session-level variants. */
 export function buildBrief(
   task: Task,
   allTasks: Task[],
@@ -216,6 +217,7 @@ export function buildBrief(
 
 // ─── Architect Brief ─────────────────────────────────────────────────────────
 
+/** @internal — only used by tests; production code uses session-level variants. */
 export function buildArchitectBrief(
   task: Task,
   allTasks: Task[],
@@ -308,6 +310,7 @@ export function buildArchitectBrief(
 
 // ─── Implementation Brief ────────────────────────────────────────────────────
 
+/** @internal — only used by tests; production code uses session-level variants. */
 export function buildImplementationBrief(
   task: Task,
   _allTasks: Task[],

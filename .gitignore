@@ -10,3 +10,9 @@ logs/
 .qa-report.md
 
 .brief-s*.md
+
+# Liteboard run artifacts (ephemeral, regenerated per run)
+docs/**/logs/
+docs/**/artifacts/
+docs/**/progress.md
+docs/**/memory.md

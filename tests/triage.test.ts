@@ -1,18 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Task, Session, DecisionContext, DecisionRecord, FailureStage, ActionDescription } from "../src/types.js";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
+import type { Task, Session, DecisionContext, DecisionRecord, FailureStage, ActionDescription, ProjectConfig, SimpleAgentConfig } from "../src/types.js";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(() => Buffer.from("")),
-  execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => false),
-  readFileSync: vi.fn(() => ""),
+  readFileSync: vi.fn(),
   appendFileSync: vi.fn(),
   writeFileSync: vi.fn(),
+  renameSync: vi.fn(),
   mkdirSync: vi.fn(),
 }));
 
@@ -49,10 +52,19 @@ vi.mock("../src/worktree.js", () => ({
   recreateWorktreeFromBranch: vi.fn(() => "/tmp/worktree-path"),
 }));
 
-import { execFileSync, execFile } from "node:child_process";
+vi.mock("../src/provider.js", () => ({
+  getProviderEnv: vi.fn((provider: string) =>
+    provider === "ollama"
+      ? { ANTHROPIC_BASE_URL: "http://localhost:11434", ANTHROPIC_AUTH_TOKEN: "ollama", ANTHROPIC_API_KEY: "" }
+      : undefined,
+  ),
+}));
+
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { getRecentOutput, extendStallTimeout } from "../src/spawner.js";
 import { cleanupWorktree, recreateWorktreeFromBranch } from "../src/worktree.js";
+import { getProviderEnv } from "../src/provider.js";
 import {
   parseTriageResponse,
   isActionLegal,
@@ -68,10 +80,8 @@ import {
   MAX_TRIAGE_ATTEMPTS,
   MAX_ERROR_TAIL_LENGTH,
 } from "../src/triage.js";
-import type { ProjectConfig, SimpleAgentConfig } from "../src/types.js";
-
 const mockExec = vi.mocked(execFileSync);
-const mockExecFile = vi.mocked(execFile);
+const mockSpawn = vi.mocked(spawn);
 const mockExistsSync = vi.mocked(fs.existsSync);
 const mockReadFileSync = vi.mocked(fs.readFileSync);
 const mockAppendFileSync = vi.mocked(fs.appendFileSync);
@@ -81,6 +91,7 @@ const mockGetRecentOutput = vi.mocked(getRecentOutput);
 const mockCleanupWorktree = vi.mocked(cleanupWorktree);
 const mockRecreateWorktree = vi.mocked(recreateWorktreeFromBranch);
 const mockExtendStallTimeout = vi.mocked(extendStallTimeout);
+const mockGetProviderEnv = vi.mocked(getProviderEnv);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -356,13 +367,13 @@ describe("readDecisionHistory", () => {
   });
 
   it("reads from session-scoped file path", () => {
-    mockReadFileSync.mockReturnValueOnce(JSON.stringify(record) as unknown as Buffer);
+    mockReadFileSync.mockReturnValueOnce(JSON.stringify(record));
     readDecisionHistory("abc", "/proj");
     expect(mockReadFileSync).toHaveBeenCalledWith("/proj/artifacts/sabc-decisions.jsonl", "utf-8");
   });
 
   it("parses single record", () => {
-    mockReadFileSync.mockReturnValueOnce(JSON.stringify(record) as unknown as Buffer);
+    mockReadFileSync.mockReturnValueOnce(JSON.stringify(record));
     const result = readDecisionHistory("abc", "/proj");
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual(record);
@@ -372,7 +383,7 @@ describe("readDecisionHistory", () => {
     const record2 = { ...record, attemptNumber: 2 };
     const record3 = { ...record, attemptNumber: 3 };
     mockReadFileSync.mockReturnValueOnce(
-      `${JSON.stringify(record)}\n${JSON.stringify(record2)}\n${JSON.stringify(record3)}` as unknown as Buffer,
+      `${JSON.stringify(record)}\n${JSON.stringify(record2)}\n${JSON.stringify(record3)}`,
     );
     const result = readDecisionHistory("abc", "/proj");
     expect(result).toHaveLength(3);
@@ -380,19 +391,19 @@ describe("readDecisionHistory", () => {
 
   it("skips malformed lines", () => {
     mockReadFileSync.mockReturnValueOnce(
-      `${JSON.stringify(record)}\nnot_json\n${JSON.stringify({ ...record, attemptNumber: 2 })}` as unknown as Buffer,
+      `${JSON.stringify(record)}\nnot_json\n${JSON.stringify({ ...record, attemptNumber: 2 })}`,
     );
     const result = readDecisionHistory("abc", "/proj");
     expect(result).toHaveLength(2);
   });
 
   it("handles empty file", () => {
-    mockReadFileSync.mockReturnValueOnce("" as unknown as Buffer);
+    mockReadFileSync.mockReturnValueOnce("");
     expect(readDecisionHistory("abc", "/proj")).toEqual([]);
   });
 
   it("handles trailing newline", () => {
-    mockReadFileSync.mockReturnValueOnce(`${JSON.stringify(record)}\n` as unknown as Buffer);
+    mockReadFileSync.mockReturnValueOnce(`${JSON.stringify(record)}\n`);
     expect(readDecisionHistory("abc", "/proj")).toHaveLength(1);
   });
 });
@@ -440,14 +451,20 @@ describe("writeEscalation", () => {
     },
   ];
 
-  it("writes markdown escalation file with session context and history", () => {
+  it("writes markdown escalation file with atomic write (temp + rename)", () => {
     const context = makeContext({ history });
     writeEscalation(session, decision, context, "/proj");
 
+    // Atomic write: writes to .tmp first, then renames
     expect(mockWriteFileSync).toHaveBeenCalledWith(
-      "/proj/artifacts/sabc-escalation.md",
+      "/proj/artifacts/sabc-escalation.md.tmp",
       expect.any(String),
       "utf-8",
+    );
+    const mockRenameSync = vi.mocked(fs.renameSync);
+    expect(mockRenameSync).toHaveBeenCalledWith(
+      "/proj/artifacts/sabc-escalation.md.tmp",
+      "/proj/artifacts/sabc-escalation.md",
     );
 
     const content = mockWriteFileSync.mock.calls[0][1] as string;
@@ -485,6 +502,15 @@ describe("writeEscalation", () => {
 
     expect(mockMkdirSync).toHaveBeenCalledWith("/proj/artifacts", { recursive: true });
     expect(mockWriteFileSync).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates non-ENOENT errors from writeWithMkdir", () => {
+    const permErr = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    mockWriteFileSync.mockImplementationOnce(() => { throw permErr; });
+
+    const context = makeContext();
+    expect(() => writeEscalation(session, decision, context, "/proj")).toThrow("EACCES");
+    expect(mockMkdirSync).not.toHaveBeenCalled();
   });
 });
 
@@ -657,7 +683,7 @@ describe("gatherDecisionContext", () => {
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
     const ctx = await gatherDecisionContext(
-      session, [session, downstreamSession, unrelated], featureBranch, "/proj", 4, trigger,
+      session, [session, downstreamSession, unrelated], featureBranch, "/proj", 4, trigger, "proj", false,
     );
 
     expect(ctx.trigger.stage).toBe("implementation");
@@ -691,7 +717,7 @@ describe("gatherDecisionContext", () => {
     mockExistsSync.mockReturnValue(false);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
 
     expect(ctx.state.branchExists).toBe(false);
     expect(ctx.state.commitsAhead).toBe(0);
@@ -715,7 +741,7 @@ describe("gatherDecisionContext", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.state.worktreeClean).toBe(false);
   });
 
@@ -732,7 +758,7 @@ describe("gatherDecisionContext", () => {
     });
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
 
     expect(ctx.state.worktreeExists).toBe(false);
     expect(ctx.state.worktreeClean).toBe(false);
@@ -756,7 +782,7 @@ describe("gatherDecisionContext", () => {
     });
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.state.planExists).toBe(false);
   });
 
@@ -767,7 +793,7 @@ describe("gatherDecisionContext", () => {
     mockGetRecentOutput.mockReturnValueOnce(["line1", "line2", "line3"]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.trigger.errorTail).toBe("line1\nline2\nline3");
   });
 
@@ -782,9 +808,9 @@ describe("gatherDecisionContext", () => {
     // readDecisionHistory is called first (throws ENOENT), then log file is read
     mockReadFileSync
       .mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }) // decisions JSONL
-      .mockReturnValueOnce(logLines as unknown as Buffer); // log file
+      .mockReturnValueOnce(logLines); // log file
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     const errorLines = ctx.trigger.errorTail.split("\n");
     expect(errorLines).toHaveLength(30);
     expect(errorLines[0]).toBe("log line 11"); // last 30 of 40 lines
@@ -798,7 +824,7 @@ describe("gatherDecisionContext", () => {
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.trigger.errorTail).toBe("");
   });
 
@@ -811,10 +837,10 @@ describe("gatherDecisionContext", () => {
     mockGetRecentOutput.mockReturnValueOnce([]);
     // History has 2 records, but session.attemptCount = 3 — should use the session value
     mockReadFileSync.mockReturnValueOnce(
-      `${JSON.stringify(record1)}\n${JSON.stringify(record2)}` as unknown as Buffer,
+      `${JSON.stringify(record1)}\n${JSON.stringify(record2)}`,
     );
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.state.attemptCount).toBe(3);
   });
 
@@ -841,7 +867,7 @@ describe("gatherDecisionContext", () => {
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
     const ctx = await gatherDecisionContext(
-      session, [session, depSession1, depSession2, otherSession], "feature/main", "/proj", 4, trigger,
+      session, [session, depSession1, depSession2, otherSession], "feature/main", "/proj", 4, trigger, "proj", false,
     );
     expect(ctx.task.blockedDownstream).toBe(2);
   });
@@ -858,7 +884,7 @@ describe("gatherDecisionContext", () => {
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
     const ctx = await gatherDecisionContext(
-      session, [session, running1, running2, done], "feature/main", "/proj", 4, trigger,
+      session, [session, running1, running2, done], "feature/main", "/proj", 4, trigger, "proj", false,
     );
     expect(ctx.state.runningTasks).toBe(2);
     expect(ctx.state.freeSlots).toBe(2);
@@ -876,7 +902,7 @@ describe("gatherDecisionContext", () => {
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.state.commitsAhead).toBe(0); // fallback to 0, no throw
   });
 
@@ -891,7 +917,7 @@ describe("gatherDecisionContext", () => {
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
 
     expect(ctx.session.totalTasks).toBe(3);
     expect(ctx.session.completedTasks).toBe(1);
@@ -909,8 +935,20 @@ describe("gatherDecisionContext", () => {
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.state.planExists).toBe(true);
+  });
+
+  it("handles session with zero tasks gracefully", async () => {
+    const session = makeSession({ id: "empty", tasks: [] });
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockGetRecentOutput.mockReturnValueOnce([]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
+    expect(ctx.task.title).toBe("Session empty"); // Falls back to session.focus
+    expect(ctx.session.totalTasks).toBe(0);
+    expect(ctx.session.completedTasks).toBe(0);
   });
 });
 
@@ -943,19 +981,32 @@ function makeConfig(triage?: SimpleAgentConfig): ProjectConfig {
   };
 }
 
-/** Helper to make execFile call a callback with (null, stdout) */
-function mockExecFileSuccess(stdout: string): void {
-  mockExecFile.mockImplementationOnce((_cmd, _args, _opts, callback) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (callback as any)(null, stdout, "");
-    return undefined as any;
+/** Creates a mock ChildProcess with EventEmitter-based stdout/stderr. */
+function makeMockChild(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  child.stdout = new EventEmitter() as ChildProcess["stdout"];
+  child.stderr = new EventEmitter() as ChildProcess["stderr"];
+  child.kill = vi.fn(() => true);
+  child.pid = 12345;
+  return child;
+}
+
+/** Helper to make spawn emit stdout data then close successfully. */
+function mockSpawnSuccess(stdout: string): void {
+  const child = makeMockChild();
+  mockSpawn.mockImplementationOnce(() => {
+    setImmediate(() => {
+      child.stdout!.emit("data", Buffer.from(stdout));
+      child.emit("close", 0);
+    });
+    return child;
   });
 }
 
 describe("askTriage", () => {
   it("returns valid decision when claude -p succeeds", async () => {
     const ctx = makeContext();
-    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "test" }));
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "test" }));
 
     const decision = await askTriage(ctx, "/proj", makeConfig());
     expect(decision.action).toBe("retry_from_scratch");
@@ -964,10 +1015,10 @@ describe("askTriage", () => {
 
   it("returns escalate on spawn/timeout failure", async () => {
     const ctx = makeContext();
-    mockExecFile.mockImplementationOnce((_cmd, _args, _opts, callback) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (callback as any)(new Error("spawn failed"), "", "");
-      return undefined as any;
+    const child = makeMockChild();
+    mockSpawn.mockImplementationOnce(() => {
+      setImmediate(() => child.emit("error", new Error("spawn failed")));
+      return child;
     });
 
     const decision = await askTriage(ctx, "/proj", makeConfig());
@@ -977,7 +1028,7 @@ describe("askTriage", () => {
 
   it("returns escalate when response is unparseable", async () => {
     const ctx = makeContext();
-    mockExecFileSuccess("not json at all");
+    mockSpawnSuccess("not json at all");
 
     const decision = await askTriage(ctx, "/proj", makeConfig());
     expect(decision.action).toBe("escalate");
@@ -986,7 +1037,7 @@ describe("askTriage", () => {
   it("returns escalate when chosen action is illegal", async () => {
     // resume_from_branch requires branchExists && commitsAhead > 0
     const ctx = makeContext({ state: { branchExists: false, commitsAhead: 0, diffStat: "", worktreeExists: false, worktreeClean: false, planExists: false, attemptCount: 0, runningTasks: 0, freeSlots: 4 } });
-    mockExecFileSuccess(JSON.stringify({ action: "resume_from_branch", reasoning: "try to resume" }));
+    mockSpawnSuccess(JSON.stringify({ action: "resume_from_branch", reasoning: "try to resume" }));
 
     const decision = await askTriage(ctx, "/proj", makeConfig());
     expect(decision.action).toBe("escalate");
@@ -999,12 +1050,12 @@ describe("askTriage", () => {
     const decision = await askTriage(ctx, "/proj", makeConfig());
     expect(decision.action).toBe("escalate");
     expect(decision.reasoning).toContain("Max triage attempts");
-    expect(mockExecFile).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it("calls logTriageResponse with session ID from context.session", async () => {
     const ctx = makeContext({ session: { id: "mysession", totalTasks: 1, completedTasks: 0, remainingTasks: [], complexity: 3 } });
-    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
 
     await askTriage(ctx, "/proj", makeConfig());
     expect(mockAppendFileSync).toHaveBeenCalledWith(
@@ -1016,11 +1067,11 @@ describe("askTriage", () => {
 
   it("uses config.triage.model when provided", async () => {
     const ctx = makeContext();
-    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
 
     await askTriage(ctx, "/proj", makeConfig({ provider: "claude", model: "claude-opus-4-6" }));
 
-    const args = mockExecFile.mock.calls[0][1] as string[];
+    const args = mockSpawn.mock.calls[0][1] as string[];
     const modelIdx = args.indexOf("--model");
     expect(modelIdx).toBeGreaterThan(-1);
     expect(args[modelIdx + 1]).toBe("claude-opus-4-6");
@@ -1028,14 +1079,86 @@ describe("askTriage", () => {
 
   it("defaults to claude-sonnet-4-6 when no triage config", async () => {
     const ctx = makeContext();
-    mockExecFileSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
 
     await askTriage(ctx, "/proj", makeConfig(undefined));
 
-    const args = mockExecFile.mock.calls[0][1] as string[];
+    const args = mockSpawn.mock.calls[0][1] as string[];
     const modelIdx = args.indexOf("--model");
     expect(modelIdx).toBeGreaterThan(-1);
     expect(args[modelIdx + 1]).toBe("claude-sonnet-4-6");
+  });
+
+  it("closes stdin to prevent claude -p from hanging", async () => {
+    const ctx = makeContext();
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+
+    await askTriage(ctx, "/proj", makeConfig());
+
+    const opts = mockSpawn.mock.calls[0][2] as { stdio?: string[] };
+    expect(opts.stdio).toEqual(["ignore", "pipe", "pipe"]);
+  });
+
+  it("strips CLAUDECODE from env to prevent recursive invocation", async () => {
+    const ctx = makeContext();
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+
+    // Simulate CLAUDECODE being in process.env
+    process.env.CLAUDECODE = "1";
+    try {
+      await askTriage(ctx, "/proj", makeConfig());
+    } finally {
+      delete process.env.CLAUDECODE;
+    }
+
+    const opts = mockSpawn.mock.calls[0][2] as { env?: Record<string, string> };
+    expect(opts.env!["CLAUDECODE"]).toBeUndefined();
+  });
+
+  it("serializes concurrent triage calls via mutex", async () => {
+    const ctx = makeContext();
+    const order: number[] = [];
+
+    // First call takes a tick to resolve
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "first" }));
+    mockSpawnSuccess(JSON.stringify({ action: "escalate", reasoning: "second" }));
+
+    const p1 = askTriage(ctx, "/proj", makeConfig()).then((d) => { order.push(1); return d; });
+    const p2 = askTriage(ctx, "/proj", makeConfig()).then((d) => { order.push(2); return d; });
+
+    const [d1, d2] = await Promise.all([p1, p2]);
+    expect(d1.reasoning).toBe("first");
+    expect(d2.reasoning).toBe("second");
+    expect(order).toEqual([1, 2]); // serialized, not interleaved
+  });
+});
+
+// ─── askTriage — provider env propagation ────────────────────────────────────
+
+describe("askTriage — provider env propagation", () => {
+  it("passes ollama env vars to claude CLI when triage provider is ollama", async () => {
+    const ctx = makeContext();
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+
+    await askTriage(ctx, "/proj", makeConfig({ provider: "ollama", model: "kimi-k2.5" }));
+
+    const opts = mockSpawn.mock.calls[0][2] as { env?: Record<string, string> };
+    expect(opts.env).toBeDefined();
+    expect(opts.env!["ANTHROPIC_BASE_URL"]).toBe("http://localhost:11434");
+    expect(opts.env!["ANTHROPIC_AUTH_TOKEN"]).toBe("ollama");
+    expect(mockGetProviderEnv).toHaveBeenCalledWith("ollama", undefined);
+  });
+
+  it("does not include ollama env vars when triage provider is claude", async () => {
+    const ctx = makeContext();
+    mockSpawnSuccess(JSON.stringify({ action: "retry_from_scratch", reasoning: "ok" }));
+
+    await askTriage(ctx, "/proj", makeConfig({ provider: "claude", model: "claude-sonnet-4-6" }));
+
+    const opts = mockSpawn.mock.calls[0][2] as { env?: Record<string, string> };
+    expect(opts.env).toBeDefined();
+    expect(opts.env!["ANTHROPIC_BASE_URL"]).toBeUndefined();
+    expect(mockGetProviderEnv).toHaveBeenCalledWith("claude", undefined);
   });
 });
 
@@ -1309,7 +1432,7 @@ describe("gatherDecisionContext — taskTddPhases", () => {
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
 
     expect(ctx.session.taskTddPhases).toEqual([
       { id: 1, title: "Setup DB", tddPhase: "Exempt" },
@@ -1327,7 +1450,7 @@ describe("gatherDecisionContext — taskTddPhases", () => {
     mockGetRecentOutput.mockReturnValueOnce([]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
 
     expect(ctx.session.taskTddPhases).toEqual([
       { id: 1, title: "Write test", tddPhase: "RED" },
@@ -1385,7 +1508,7 @@ describe("gatherDecisionContext — JSONL errorTail extraction", () => {
     mockGetRecentOutput.mockReturnValueOnce([jsonlLine, "plain stderr line"]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.trigger.errorTail).toBe("Build failed: missing module\nplain stderr line");
   });
 
@@ -1399,9 +1522,9 @@ describe("gatherDecisionContext — JSONL errorTail extraction", () => {
     mockExistsSync.mockImplementation((p) => String(p) === "/logs/sabc.jsonl");
     mockReadFileSync
       .mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })
-      .mockReturnValueOnce(logContent as unknown as Buffer);
+      .mockReturnValueOnce(logContent);
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.trigger.errorTail).toBe("Test suite failed\nplain error line");
   });
 });
@@ -1420,7 +1543,7 @@ describe("gatherDecisionContext — errorTail size cap", () => {
     mockGetRecentOutput.mockReturnValueOnce([longOutput]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.trigger.errorTail.length).toBe(MAX_ERROR_TAIL_LENGTH);
   });
 
@@ -1434,7 +1557,7 @@ describe("gatherDecisionContext — errorTail size cap", () => {
     mockGetRecentOutput.mockReturnValueOnce([longOutput]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.trigger.errorTail.endsWith(tail)).toBe(true);
     expect(ctx.trigger.errorTail.startsWith("TAIL_MARKER")).toBe(false);
   });
@@ -1448,7 +1571,7 @@ describe("gatherDecisionContext — errorTail size cap", () => {
     mockGetRecentOutput.mockReturnValueOnce([shortOutput]);
     mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
 
-    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger, "proj", false);
     expect(ctx.trigger.errorTail).toBe(shortOutput);
   });
 });

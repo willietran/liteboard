@@ -134,6 +134,9 @@ export interface SimpleAgentConfig {
   model: string;
 }
 
+/** Default model for the triage agent when no config is provided. */
+export const DEFAULT_TRIAGE_MODEL = "claude-sonnet-4-6";
+
 // ─── Project Config ───────────────────────────────────────────────────────
 
 export interface ProjectConfig {
@@ -357,6 +360,24 @@ export interface Session {
 export type SessionProgressEntry =
   | { status: "done"; completedAt: string }
   | { status: "needs_human" };
+
+// ─── Session Runner Context ───────────────────────────────────────────────
+
+export interface SessionRunnerContext {
+  args: CLIArgs;
+  slug: string;
+  filteredSessions: Session[];
+  allSessions: Session[];
+  allTasks: Task[];
+  designDoc: string;
+  manifestContent: string;
+  provider: Provider;
+  projectConfig: ProjectConfig;
+  activePromises: Map<string, Promise<void>>;
+  qaReports: Map<string, string>;
+  updateStatuses: () => void;
+  sessionDeps: Map<string, string[]>;
+}
 
 // ─── Dependency Layer ─────────────────────────────────────────────────────
 
