@@ -60,22 +60,30 @@ Orchestrator (TypeScript CLI, ~500-600 lines)
 | **Plan and plan review** | Agent writes plan, spawns review sub-agent |
 | **Implementation + TDD** | This IS the agent's core job |
 | **Code review** | Spawns independent Code Review sub-agent |
-| **Merge to feature branch** | Agent runs git merge + build validation following merge protocol |
-| **Failure recovery** | Agent retries, adapts, or reports — LLMs reason about failures natively |
+| **Build validation before merge** | Agent runs npm install, tsc, npm test before exiting — ensures session branch is clean |
+| **In-session failure recovery** | Agent retries failing tests, adapts implementation — LLMs reason about failures natively |
 | **Memory/knowledge sharing** | Agent writes memory entries to shared file |
 | **Worktree creation/cleanup** | 3 git commands — agent can do this |
 
-### Orchestrator Modules (~500-600 lines)
+### Orchestrator Modules (~700-800 lines)
 
 | Module | Lines | Purpose |
 |---|---|---|
-| `cli.ts` | ~150 | Arg parsing, main loop, spawn sessions, watch completion |
+| `cli.ts` | ~150 | Arg parsing, main loop, spawn sessions, watch completion, retry on failure |
 | `dashboard.ts` | ~300 | ANSI terminal rendering (keep existing, simplify) |
+| `spawn.ts` | ~80 | Spawn `claude -p` with multi-provider env injection, lightweight stream parsing (stage, bytes, last line for dashboard), stall detection (startup + mid-task timeouts) |
+| `merge-gate.ts` | ~50 | Mutex-serialized merge gate: when agent exits 0, orchestrator runs squash merge to feature branch (prevents concurrent merge corruption). Resets branch on failure. |
+| `worktree.ts` | ~50 | Create/cleanup worktrees (orchestrator-managed for crash recovery on SIGINT) |
 | `progress.ts` | ~50 | Write/read progress.md, resume detection |
-| `safety.ts` | ~30 | `resetFeatureBranch()` — hard reset on merge failure |
-| `spawn.ts` | ~50 | Spawn `claude -p` with multi-provider env injection |
 
-**Removed modules:** `brief.ts`, `spawner.ts`, `provider.ts`, `merger.ts`, `triage.ts`, `memory.ts`, `resolver.ts`, `build-validation.ts`, `config.ts` (absorbed into cli.ts or delegated to agents).
+**Removed modules:** `brief.ts`, `provider.ts`, `triage.ts`, `memory.ts`, `resolver.ts`, `build-validation.ts`, `config.ts` (absorbed into cli.ts or delegated to agents).
+
+**Key spec review findings incorporated:**
+- **Merge serialization stays in code** — agents commit to session branches, orchestrator gates the squash merge to feature branch with a mutex. Prevents concurrent corruption.
+- **Stall detection stays in code** — agents can't detect their own stalls (frozen process). Orchestrator monitors bytes/second with startup (2min) and mid-task (5min) timeouts.
+- **Stream parsing stays (lightweight)** — dashboard needs stage, turn count, bytes received. Without it, dashboard degrades to "running/done" — unacceptable UX regression.
+- **Worktree lifecycle stays in code** — orchestrator must clean up on crash/SIGINT. Agents create branches; orchestrator creates/destroys worktree checkouts.
+- **Post-exit retry in code** — when agent exits non-zero, orchestrator retries once with error context, then skips. Simple heuristic replaces 600-line triage system.
 
 ### Agent Instructions (commands/ + CLAUDE.md)
 
