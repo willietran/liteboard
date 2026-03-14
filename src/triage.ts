@@ -21,6 +21,7 @@ import { createMutex } from "./mutex.js";
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 export const MAX_TRIAGE_ATTEMPTS = 3;
+export const MAX_ERROR_TAIL_LENGTH = 4000;
 
 const VALID_ACTIONS: ReadonlySet<string> = new Set<TriageAction>([
   "retry_from_scratch",
@@ -435,6 +436,10 @@ export async function gatherDecisionContext(
     errorTail = extractReadableLines(rawLines).join("\n");
   } else {
     errorTail = "";
+  }
+
+  if (errorTail.length > MAX_ERROR_TAIL_LENGTH) {
+    errorTail = errorTail.slice(-MAX_ERROR_TAIL_LENGTH);
   }
 
   // ── Counts ────────────────────────────────────────────────────────────────

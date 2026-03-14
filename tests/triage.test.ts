@@ -66,6 +66,7 @@ import {
   executeTriageAction,
   extractReadableLines,
   MAX_TRIAGE_ATTEMPTS,
+  MAX_ERROR_TAIL_LENGTH,
 } from "../src/triage.js";
 import type { ProjectConfig, SimpleAgentConfig } from "../src/types.js";
 
@@ -1402,5 +1403,52 @@ describe("gatherDecisionContext — JSONL errorTail extraction", () => {
 
     const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
     expect(ctx.trigger.errorTail).toBe("Test suite failed\nplain error line");
+  });
+});
+
+// ─── gatherDecisionContext — errorTail size cap ───────────────────────────────
+
+describe("gatherDecisionContext — errorTail size cap", () => {
+  const trigger = { stage: "implementation" as const, exitCode: 1 };
+
+  it("truncates errorTail exceeding MAX_ERROR_TAIL_LENGTH", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
+    const longOutput = "x".repeat(MAX_ERROR_TAIL_LENGTH + 1000);
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockReturnValue(false);
+    mockGetRecentOutput.mockReturnValueOnce([longOutput]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    expect(ctx.trigger.errorTail.length).toBe(MAX_ERROR_TAIL_LENGTH);
+  });
+
+  it("keeps tail end when truncating (most recent output)", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
+    const tail = "TAIL_MARKER";
+    const longOutput = "a".repeat(MAX_ERROR_TAIL_LENGTH) + tail;
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockReturnValue(false);
+    mockGetRecentOutput.mockReturnValueOnce([longOutput]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    expect(ctx.trigger.errorTail.endsWith(tail)).toBe(true);
+    expect(ctx.trigger.errorTail.startsWith("TAIL_MARKER")).toBe(false);
+  });
+
+  it("does not truncate errorTail under the cap", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
+    const shortOutput = "short error output";
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockReturnValue(false);
+    mockGetRecentOutput.mockReturnValueOnce([shortOutput]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    expect(ctx.trigger.errorTail).toBe(shortOutput);
   });
 });
