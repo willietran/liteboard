@@ -922,36 +922,6 @@ describe("parseSessions", () => {
     });
   });
 
-  // ── Layer consistency validation ─────────────────────────────────────────
-
-  describe("validates layer consistency when taskLayerMap provided", () => {
-    it("does not throw when all tasks in a session share the same layer", () => {
-      const tasks = [
-        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
-        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
-      ];
-      const layerMap = new Map([[1, 0], [2, 0]]);
-      expect(() => parseSessions(tasks, "", layerMap)).not.toThrow();
-    });
-
-    it("throws when tasks in a session span multiple layers", () => {
-      const tasks = [
-        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
-        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
-      ];
-      const layerMap = new Map([[1, 0], [2, 1]]);
-      expect(() => parseSessions(tasks, "", layerMap)).toThrow(/cross-layer/i);
-    });
-
-    it("does not validate layers when taskLayerMap is not provided", () => {
-      const tasks = [
-        makeTask({ id: 1, title: "T1", suggestedSession: "S1" }),
-        makeTask({ id: 2, title: "T2", suggestedSession: "S1" }),
-      ];
-      expect(() => parseSessions(tasks, "")).not.toThrow();
-    });
-  });
-
   // ── Stable sort order ────────────────────────────────────────────────────
 
   describe("returns sessions in stable order by first task id", () => {

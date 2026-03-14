@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { Session, Task, CLIArgs } from "./types.js";
 import { defaultModelConfig } from "./types.js";
 import { parseManifest, parseSessions } from "./parser.js";
-import { topologicalSort, resolveSessionDependencies, hasSessionFileConflict } from "./resolver.js";
+import { resolveSessionDependencies, hasSessionFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
 import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, checkOllamaModel, pullOllamaModel } from "./provider.js";
 import { parseProjectConfig, validateConfig, hasOllamaProvider, applyOllamaFallback } from "./config.js";
@@ -361,17 +361,8 @@ async function main(): Promise<void> {
     }
   }
 
-  // Build layer map for session validation
-  const layers = topologicalSort(filteredTasks);
-  const taskLayerMap = new Map<number, number>();
-  for (const layer of layers) {
-    for (const taskId of layer.taskIds) {
-      taskLayerMap.set(taskId, layer.layerIndex);
-    }
-  }
-
   // Build sessions
-  let filteredSessions = parseSessions(filteredTasks, manifestContent, taskLayerMap);
+  let filteredSessions = parseSessions(filteredTasks, manifestContent);
   const allSessions = parseSessions(allTasks, manifestContent);
   const sessionDeps = resolveSessionDependencies(filteredSessions);
 

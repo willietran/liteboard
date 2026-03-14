@@ -199,12 +199,10 @@ function parseSessionHintsTable(content: string): Map<string, string> {
 /**
  * Groups tasks into sessions based on their suggestedSession hint.
  * Tasks without a hint get an auto-generated single-task session.
- * Optionally validates that all tasks in a session share the same dependency layer.
  */
 export function parseSessions(
   tasks: Task[],
   manifest: string,
-  taskLayerMap?: Map<number, number>,
 ): Session[] {
   const hintsTable = parseSessionHintsTable(manifest);
 
@@ -223,17 +221,6 @@ export function parseSessions(
   const sessions: Session[] = [];
 
   for (const [id, groupTasks] of groups) {
-    // Validate layer consistency if a layer map was provided
-    if (taskLayerMap) {
-      const layers = new Set(groupTasks.map((t) => taskLayerMap.get(t.id)));
-      if (layers.size > 1) {
-        throw new Error(
-          `Session "${id}" contains tasks from multiple dependency layers (cross-layer session): ` +
-            groupTasks.map((t) => `T${t.id}→layer${taskLayerMap.get(t.id)}`).join(", "),
-        );
-      }
-    }
-
     const complexity = groupTasks.reduce((sum, t) => sum + t.complexity, 0);
     const focus = hintsTable.get(id) ?? groupTasks.map((t) => t.title).join(", ");
     const anyBlocked = groupTasks.some((t) => t.status === "blocked");
