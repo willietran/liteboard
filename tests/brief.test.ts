@@ -1412,3 +1412,99 @@ describe("buildSessionBrief dispatcher", () => {
     expect(brief).toContain("# Agent Orientation");
   });
 });
+
+// ─── Worktree Isolation Section ──────────────────────────────────────────────
+
+describe("worktree isolation section", () => {
+  beforeEach(() => {
+    stubReadFileSync();
+    vi.mocked(readMemorySnapshot).mockReturnValue(null);
+  });
+
+  describe("buildSessionArchitectBrief", () => {
+    it("includes isolation section when worktreePath is provided", () => {
+      const task = makeTask({ id: 1, title: "Plan feature" });
+      const session = makeSession({ id: "S1", tasks: [task], focus: "Plan" });
+      const brief = buildSessionArchitectBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s1",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s1");
+      expect(brief).toContain("NEVER run git commands from that path");
+      expect(brief).toContain("/fake/project/artifacts");
+    });
+
+    it("omits isolation section when worktreePath is undefined", () => {
+      const task = makeTask({ id: 1, title: "Plan feature" });
+      const session = makeSession({ id: "S1", tasks: [task], focus: "Plan" });
+      const brief = buildSessionArchitectBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+      );
+
+      expect(brief).not.toContain("## Working Directory Isolation");
+    });
+  });
+
+  describe("buildSessionImplementationBrief", () => {
+    it("includes isolation section when worktreePath is provided", () => {
+      const task = makeTask({ id: 2, title: "Build feature" });
+      const session = makeSession({ id: "S2", tasks: [task], focus: "Implement" });
+      const brief = buildSessionImplementationBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s2",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s2");
+      expect(brief).toContain("ALL code changes, builds, tests, and git commands MUST run from this directory");
+    });
+
+    it("omits isolation section when worktreePath is undefined", () => {
+      const task = makeTask({ id: 2, title: "Build feature" });
+      const session = makeSession({ id: "S2", tasks: [task], focus: "Implement" });
+      const brief = buildSessionImplementationBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+      );
+
+      expect(brief).not.toContain("## Working Directory Isolation");
+    });
+  });
+
+  describe("buildSessionBrief", () => {
+    it("threads worktreePath to QA brief for QA sessions", () => {
+      const task = makeTask({ id: 3, title: "Validate", type: "qa" });
+      const session = makeSession({ id: "S3", tasks: [task], focus: "QA" });
+      const brief = buildSessionBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s3",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s3");
+    });
+
+    it("threads worktreePath to implementation brief for non-QA sessions", () => {
+      const task = makeTask({ id: 4, title: "Build thing" });
+      const session = makeSession({ id: "S4", tasks: [task], focus: "Impl" });
+      const brief = buildSessionBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s4",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s4");
+    });
+
+    it("omits isolation when worktreePath is undefined (backward compat)", () => {
+      const task = makeTask({ id: 5, title: "Build thing" });
+      const session = makeSession({ id: "S5", tasks: [task], focus: "Impl" });
+      const brief = buildSessionBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+      );
+
+      expect(brief).not.toContain("## Working Directory Isolation");
+    });
+  });
+});

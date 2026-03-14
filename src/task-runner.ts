@@ -346,7 +346,7 @@ export function spawnSession(ctx: SessionRunnerContext, session: Session): void 
   // QA sessions: single-phase spawn (no architect)
   if (session.tasks.every(t => t.type === "qa")) {
     const child = trySpawnSessionPhase(ctx, session, wp, "qa",
-      () => buildSessionBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+      () => buildSessionBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider, wp),
       onStall,
     );
     if (!child) return;
@@ -361,7 +361,7 @@ export function spawnSession(ctx: SessionRunnerContext, session: Session): void 
   // Low-complexity sessions: single-phase implementation (no architect)
   if (session.complexity <= LOW_COMPLEXITY_THRESHOLD) {
     const child = trySpawnSessionPhase(ctx, session, wp, "implementation",
-      () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+      () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider, wp),
       onStall,
     );
     if (!child) return;
@@ -377,7 +377,7 @@ export function spawnSession(ctx: SessionRunnerContext, session: Session): void 
   if (session.skipArchitect) {
     session.skipArchitect = false; // One-shot: clear after use
     const child = trySpawnSessionPhase(ctx, session, wp, "implementation",
-      () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+      () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider, wp),
       onStall,
     );
     if (!child) return;
@@ -391,7 +391,7 @@ export function spawnSession(ctx: SessionRunnerContext, session: Session): void 
 
   // Non-QA, higher-complexity sessions: two-phase architect → implementation
   const architectChild = trySpawnSessionPhase(ctx, session, wp, "architect",
-    () => buildSessionArchitectBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+    () => buildSessionArchitectBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider, wp),
     onStall,
   );
   if (!architectChild) return;
@@ -466,7 +466,7 @@ export function spawnSession(ctx: SessionRunnerContext, session: Session): void 
 
       // Phase 2: Implementation
       const implChild = trySpawnSessionPhase(ctx, session, wp, "implementation",
-        () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider),
+        () => buildSessionImplementationBrief(session, ctx.allTasks, ctx.args.projectPath, ctx.designDoc, ctx.manifestContent, ctx.args.branch, ctx.args.models, ctx.provider, wp),
         onStall,
       );
       if (!implChild) {

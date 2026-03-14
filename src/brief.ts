@@ -71,6 +71,16 @@ function appendSubagentModelsSection(
   parts.push("");
 }
 
+function appendWorktreeIsolation(parts: string[], worktreePath: string | undefined, artDir: string): void {
+  if (!worktreePath) return;
+  parts.push("## Working Directory Isolation");
+  parts.push(`You are working in an isolated git worktree at: \`${worktreePath}\``);
+  parts.push("ALL code changes, builds, tests, and git commands MUST run from this directory.");
+  parts.push("Do NOT `cd` to any other directory for code or git operations.");
+  parts.push(`The artifacts directory (\`${artDir}\`) is OUTSIDE the worktree — you may read/write plans and memory entries there, but NEVER run git commands from that path.`);
+  parts.push("");
+}
+
 function appendMemorySnapshot(parts: string[], projectDir: string): void {
   const memory = readMemorySnapshot(projectDir);
   if (memory && /^## [TS]\w+/m.test(memory)) {
@@ -417,14 +427,19 @@ function buildQABrief(
   models?: ModelConfig,
   provider?: Provider,
   artifactPrefix?: string,
+  worktreePath?: string,
 ): string {
   const slug = path.basename(projectDir);
+  const artDir = artifactsDir(projectDir);
   const parts: string[] = [];
 
   // SHARED prefix (cache-friendly):
   // 1. Agent orientation + quality standards
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
+
+  // 1.5. Worktree isolation
+  appendWorktreeIsolation(parts, worktreePath, artDir);
 
   // 2. Sub-agent model hints (qaFixer only)
   appendSubagentModelsSection(parts, [
@@ -493,7 +508,6 @@ function buildQABrief(
   parts.push(`- **Feature branch**: \`${featureBranch}\``);
   parts.push("- Do NOT touch files unrelated to this task");
   parts.push("- Do NOT push to remote");
-  const artDir = artifactsDir(projectDir);
   const prefix = artifactPrefix ?? `t${task.id}`;
   parts.push(`- If you made code fixes, write memory entry to \`${artDir}/${prefix}-memory-entry.md\` summarizing what you fixed`);
   parts.push(`- **Always** write QA report to \`${artDir}/${prefix}-qa-report.md\` with a markdown table of all tests and results`);
@@ -515,6 +529,7 @@ export function buildSessionArchitectBrief(
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
+  worktreePath?: string,
 ): string {
   const slug = path.basename(projectDir);
   const artDir = artifactsDir(projectDir);
@@ -523,6 +538,9 @@ export function buildSessionArchitectBrief(
   // 1. Architect orientation
   parts.push(readCommand("architect-orientation.md"));
   parts.push("");
+
+  // 1.5. Worktree isolation
+  appendWorktreeIsolation(parts, worktreePath, artDir);
 
   // 2. Sub-agent model hints (explore + planReview)
   appendSubagentModelsSection(parts, [
@@ -625,6 +643,7 @@ export function buildSessionImplementationBrief(
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
+  worktreePath?: string,
 ): string {
   const slug = path.basename(projectDir);
   const artDir = artifactsDir(projectDir);
@@ -633,6 +652,9 @@ export function buildSessionImplementationBrief(
   // 1. Agent orientation
   parts.push(readCommand("agent-orientation.md"));
   parts.push("");
+
+  // 1.5. Worktree isolation
+  appendWorktreeIsolation(parts, worktreePath, artDir);
 
   // 2. Sub-agent model hints (codeReview only)
   appendSubagentModelsSection(parts, [
@@ -732,9 +754,10 @@ function buildSessionQABrief(
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
+  worktreePath?: string,
 ): string {
   // QA sessions typically have 1 task — delegate with session-scoped artifact prefix
-  return buildQABrief(session.tasks[0], allTasks, projectDir, designDoc, manifest, featureBranch, models, provider, `s${session.id}`);
+  return buildQABrief(session.tasks[0], allTasks, projectDir, designDoc, manifest, featureBranch, models, provider, `s${session.id}`, worktreePath);
 }
 
 export function buildSessionBrief(
@@ -746,9 +769,10 @@ export function buildSessionBrief(
   featureBranch: string,
   models?: ModelConfig,
   provider?: Provider,
+  worktreePath?: string,
 ): string {
   if (session.tasks.every((t) => t.type === "qa")) {
-    return buildSessionQABrief(session, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
+    return buildSessionQABrief(session, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider, worktreePath);
   }
-  return buildSessionImplementationBrief(session, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider);
+  return buildSessionImplementationBrief(session, allTasks, projectDir, designDoc, manifest, featureBranch, models, provider, worktreePath);
 }
