@@ -214,6 +214,7 @@ export interface DecisionContext {
     completedTasks: number;
     remainingTasks: string[];
     complexity: number;
+    taskTddPhases: { id: number; title: string; tddPhase: TddPhase }[];
   };
   state: {
     branchExists: boolean;

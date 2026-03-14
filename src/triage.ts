@@ -95,6 +95,29 @@ function writeWithMkdir(filePath: string, writeFn: () => void): void {
   }
 }
 
+// ─── extractReadableLines ─────────────────────────────────────────────────────
+
+/**
+ * Extracts human-readable text from raw lines that may be JSONL provider stream chunks.
+ * Lines that are valid JSON with type "text_delta" have their text extracted.
+ * Non-JSON lines (stderr, plain text) are passed through as-is.
+ */
+export function extractReadableLines(rawLines: string[]): string[] {
+  const result: string[] = [];
+  for (const line of rawLines) {
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed.type === "text_delta" && typeof parsed.text === "string" && parsed.text.trim()) {
+        result.push(parsed.text);
+      }
+    } catch {
+      // Not JSON — include as-is (stderr lines, plain text)
+      if (line.trim()) result.push(line);
+    }
+  }
+  return result;
+}
+
 // ─── parseTriageResponse ──────────────────────────────────────────────────────
 
 export function parseTriageResponse(stdout: string): TriageDecision {
@@ -338,6 +361,7 @@ Consider:
 - What's been tried before (don't repeat failed strategies)
 - Downstream impact (more blocked tasks = try harder to recover)
 - Cost of each option (retry_from_scratch is expensive, retry_merge_only is cheap)
+- TDD phase context: Check taskTddPhases in the session context. If tasks are TDD-Exempt, test failures during merge validation are expected (no tests exist yet) — prefer skip_and_continue or retry_merge_only over escalation
 
 Respond with ONLY a JSON object:
 {
@@ -404,12 +428,11 @@ export async function gatherDecisionContext(
   const recentOutput = getRecentOutput(session);
   let errorTail: string;
   if (recentOutput.length > 0) {
-    errorTail = recentOutput.join("\n");
+    errorTail = extractReadableLines(recentOutput).join("\n");
   } else if (session.logPath && existsSync(session.logPath)) {
-    // Log file is JSONL (raw provider stream chunks mixed with stderr lines).
-    // Last 30 lines may include partial JSON — errorTail is descriptive, not machine-parsed.
     const content = readFileSync(session.logPath, "utf-8");
-    errorTail = content.split("\n").slice(-30).join("\n");
+    const rawLines = content.split("\n").slice(-30);
+    errorTail = extractReadableLines(rawLines).join("\n");
   } else {
     errorTail = "";
   }
@@ -459,6 +482,7 @@ export async function gatherDecisionContext(
       completedTasks: session.tasks.filter((t) => t.status === "done").length,
       remainingTasks: session.tasks.filter((t) => t.status !== "done").map((t) => t.title),
       complexity: session.complexity,
+      taskTddPhases: session.tasks.map((t) => ({ id: t.id, title: t.title, tddPhase: t.tddPhase })),
     },
     state: {
       branchExists,

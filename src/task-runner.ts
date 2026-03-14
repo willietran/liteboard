@@ -282,7 +282,7 @@ async function handleFinalClose(
       // Merge failed — invoke triage
       try {
         const mergeInfo = classifyMergeError(mergeErr);
-        await invokeTriageForSession(ctx, session, mergeInfo.stage, 0, mergeInfo.errorClass);
+        await invokeTriageForSession(ctx, session, mergeInfo.stage, 1, mergeInfo.errorClass);
       } catch (triageErr) {
         // Triage itself failed — fall back to marking session failed
         session.status = "failed";

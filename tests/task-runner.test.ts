@@ -178,7 +178,7 @@ function makeDecisionContext(): DecisionContext {
   return {
     trigger: { stage: "implementation", exitCode: 1, errorTail: "some error" },
     task: { id: 1, title: "Test", type: "", tddPhase: "GREEN", complexity: 5, requirements: [], files: [], blockedDownstream: 0 },
-    session: { id: "s1", totalTasks: 1, completedTasks: 0, remainingTasks: [], complexity: 5 },
+    session: { id: "s1", totalTasks: 1, completedTasks: 0, remainingTasks: [], complexity: 5, taskTddPhases: [] },
     state: { branchExists: true, commitsAhead: 3, diffStat: "", worktreeExists: true, worktreeClean: false, planExists: true, attemptCount: 0, runningTasks: 1, freeSlots: 1 },
     history: [],
     actions: [],
@@ -485,5 +485,21 @@ describe("invokeTriageForSession", () => {
 
     const recordArg = mockWriteDecisionRecord.mock.calls[0][1];
     expect(recordArg.attemptNumber).toBe(3);
+  });
+
+  it("passes exit code 1 (not 0) for merge-path failures", async () => {
+    const ctx = makeCtx();
+    const session = makeSession({ id: "s1" });
+
+    const context = makeDecisionContext();
+    mockGatherDecisionContext.mockResolvedValue(context);
+    mockAskTriage.mockResolvedValue({ action: "escalate", reasoning: "merge failed" });
+
+    await invokeTriageForSession(ctx, session, "test_validation", 1, "test_failure");
+
+    expect(mockGatherDecisionContext).toHaveBeenCalledWith(
+      session, [], "feat/x", "/test/project", 2,
+      { stage: "test_validation", exitCode: 1, errorClass: "test_failure" },
+    );
   });
 });

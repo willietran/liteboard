@@ -64,6 +64,7 @@ import {
   gatherDecisionContext,
   askTriage,
   executeTriageAction,
+  extractReadableLines,
   MAX_TRIAGE_ATTEMPTS,
 } from "../src/triage.js";
 import type { ProjectConfig, SimpleAgentConfig } from "../src/types.js";
@@ -142,6 +143,7 @@ function makeContext(partial?: Partial<DecisionContext>): DecisionContext {
       completedTasks: 0,
       remainingTasks: ["Task 1", "Task 2"],
       complexity: 3,
+      taskTddPhases: [],
       ...partial?.session,
     },
     state: {
@@ -1230,5 +1232,175 @@ describe("executeTriageAction", () => {
     await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
 
     expect(session.status).toBe("merging");
+  });
+});
+
+// ─── extractReadableLines ─────────────────────────────────────────────────────
+
+describe("extractReadableLines", () => {
+  it("extracts text from text_delta JSONL lines", () => {
+    const lines = [
+      JSON.stringify({ type: "text_delta", text: "Hello world" }),
+      JSON.stringify({ type: "text_delta", text: "Second line" }),
+    ];
+    expect(extractReadableLines(lines)).toEqual(["Hello world", "Second line"]);
+  });
+
+  it("passes through non-JSON lines as-is", () => {
+    const lines = ["plain error text", "another stderr line"];
+    expect(extractReadableLines(lines)).toEqual(["plain error text", "another stderr line"]);
+  });
+
+  it("skips JSON lines that are not text_delta type", () => {
+    const lines = [
+      JSON.stringify({ type: "tool_use_start", toolName: "Bash" }),
+      JSON.stringify({ type: "message_end" }),
+    ];
+    expect(extractReadableLines(lines)).toEqual([]);
+  });
+
+  it("skips text_delta lines with non-string text field", () => {
+    const lines = [JSON.stringify({ type: "text_delta", text: 42 })];
+    expect(extractReadableLines(lines)).toEqual([]);
+  });
+
+  it("skips text_delta lines with empty string text field", () => {
+    const lines = [JSON.stringify({ type: "text_delta", text: "" })];
+    expect(extractReadableLines(lines)).toEqual([]);
+  });
+
+  it("handles mixed JSONL and plain text lines", () => {
+    const lines = [
+      "stderr: process failed",
+      JSON.stringify({ type: "text_delta", text: "agent output" }),
+      JSON.stringify({ type: "tool_use_start", toolName: "Read" }),
+      "another plain line",
+    ];
+    expect(extractReadableLines(lines)).toEqual([
+      "stderr: process failed",
+      "agent output",
+      "another plain line",
+    ]);
+  });
+
+  it("skips blank lines", () => {
+    const lines = ["", "  ", "real line"];
+    expect(extractReadableLines(lines)).toEqual(["real line"]);
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(extractReadableLines([])).toEqual([]);
+  });
+});
+
+// ─── gatherDecisionContext — taskTddPhases ────────────────────────────────────
+
+describe("gatherDecisionContext — taskTddPhases", () => {
+  const trigger = { stage: "implementation" as const, exitCode: 1 };
+
+  it("includes taskTddPhases for all tasks in session", async () => {
+    const task1 = makeTask({ id: 1, title: "Setup DB", tddPhase: "Exempt" });
+    const task2 = makeTask({ id: 2, title: "Write schema", tddPhase: "Exempt" });
+    const session = makeSession({ id: "abc", tasks: [task1, task2] });
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockReturnValue(false);
+    mockGetRecentOutput.mockReturnValueOnce([]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+
+    expect(ctx.session.taskTddPhases).toEqual([
+      { id: 1, title: "Setup DB", tddPhase: "Exempt" },
+      { id: 2, title: "Write schema", tddPhase: "Exempt" },
+    ]);
+  });
+
+  it("includes mixed tddPhases correctly", async () => {
+    const task1 = makeTask({ id: 1, title: "Write test", tddPhase: "RED" });
+    const task2 = makeTask({ id: 2, title: "Implement", tddPhase: "GREEN" });
+    const session = makeSession({ id: "abc", tasks: [task1, task2] });
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockReturnValue(false);
+    mockGetRecentOutput.mockReturnValueOnce([]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+
+    expect(ctx.session.taskTddPhases).toEqual([
+      { id: 1, title: "Write test", tddPhase: "RED" },
+      { id: 2, title: "Implement", tddPhase: "GREEN" },
+    ]);
+  });
+});
+
+// ─── buildTriagePrompt — TDD phase guidance ───────────────────────────────────
+
+describe("buildTriagePrompt — TDD phase guidance", () => {
+  it("includes TDD phase guidance in the prompt", () => {
+    const context = makeContext();
+    const prompt = buildTriagePrompt(context);
+    expect(prompt).toContain("TDD phase context");
+    expect(prompt).toContain("Exempt");
+    expect(prompt).toContain("skip_and_continue");
+  });
+
+  it("taskTddPhases appears in context JSON", () => {
+    const context = makeContext({
+      session: {
+        id: "abc",
+        totalTasks: 2,
+        completedTasks: 0,
+        remainingTasks: [],
+        complexity: 3,
+        taskTddPhases: [
+          { id: 1, title: "Setup", tddPhase: "Exempt" },
+          { id: 2, title: "Schema", tddPhase: "Exempt" },
+        ],
+      },
+    });
+    const prompt = buildTriagePrompt(context);
+
+    const jsonMatch = prompt.match(/<decision_context>\n([\s\S]*?)\n<\/decision_context>/);
+    expect(jsonMatch).not.toBeNull();
+    const parsed = JSON.parse(jsonMatch![1]);
+    expect(parsed.session.taskTddPhases).toHaveLength(2);
+    expect(parsed.session.taskTddPhases[0].tddPhase).toBe("Exempt");
+  });
+});
+
+// ─── gatherDecisionContext — JSONL errorTail extraction ───────────────────────
+
+describe("gatherDecisionContext — JSONL errorTail extraction", () => {
+  const trigger = { stage: "implementation" as const, exitCode: 1 };
+
+  it("extracts readable text from ring buffer JSONL lines", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })] });
+    const jsonlLine = JSON.stringify({ type: "text_delta", text: "Build failed: missing module" });
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockExistsSync.mockReturnValue(false);
+    mockGetRecentOutput.mockReturnValueOnce([jsonlLine, "plain stderr line"]);
+    mockReadFileSync.mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); });
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    expect(ctx.trigger.errorTail).toBe("Build failed: missing module\nplain stderr line");
+  });
+
+  it("extracts readable text from log file JSONL", async () => {
+    const session = makeSession({ id: "abc", tasks: [makeTask({ id: 5 })], logPath: "/logs/sabc.jsonl" });
+    const jsonlLine = JSON.stringify({ type: "text_delta", text: "Test suite failed" });
+    const logContent = `${jsonlLine}\nplain error line`;
+
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    mockGetRecentOutput.mockReturnValueOnce([]);
+    mockExistsSync.mockImplementation((p) => String(p) === "/logs/sabc.jsonl");
+    mockReadFileSync
+      .mockImplementationOnce(() => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); })
+      .mockReturnValueOnce(logContent as unknown as Buffer);
+
+    const ctx = await gatherDecisionContext(session, [session], "feature/main", "/proj", 4, trigger);
+    expect(ctx.trigger.errorTail).toBe("Test suite failed\nplain error line");
   });
 });
