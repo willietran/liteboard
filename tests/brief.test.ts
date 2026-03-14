@@ -22,9 +22,13 @@ import {
   buildBrief,
   buildArchitectBrief,
   buildImplementationBrief,
+  buildSessionArchitectBrief,
+  buildSessionImplementationBrief,
+  buildSessionBrief,
   formatSubagentHints,
+  buildManifestExcerpt,
 } from "../src/brief.js";
-import type { Task, ModelConfig, Provider } from "../src/types.js";
+import type { Task, Session, ModelConfig, Provider } from "../src/types.js";
 import { defaultModelConfig } from "../src/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -95,6 +99,20 @@ function makeDepTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
+function makeSession(overrides: Partial<Session> & { id: string; tasks: Task[] }): Session {
+  return {
+    focus: "Test session focus",
+    complexity: 3,
+    status: "queued",
+    bytesReceived: 0,
+    turnCount: 0,
+    lastLine: "",
+    stage: "",
+    attemptCount: 0,
+    ...overrides,
+  };
+}
+
 function mockProvider(): Provider {
   return {
     name: "claude",
@@ -124,6 +142,75 @@ function mockOllamaProvider(): Provider {
     },
   };
 }
+
+// ─── TEST_MANIFEST fixture ───────────────────────────────────────────────────
+
+const TEST_MANIFEST = [
+  "# Test Project — Task Manifest",
+  "",
+  "## Tech Stack",
+  "",
+  "| Concern | Choice |",
+  "|---------|--------|",
+  "| Runtime | Node.js 22+ |",
+  "| Language | TypeScript |",
+  "",
+  "## Testing Strategy",
+  "",
+  "- All src/ modules have Vitest tests",
+  "- Mock external dependencies",
+  "",
+  "---",
+  "",
+  "## Phase 1: Foundation",
+  "",
+  "### Task 1: Setup scaffolding",
+  "",
+  "- **Creates:** `package.json`, `tsconfig.json`",
+  "- **Modifies:** (none)",
+  "- **Depends on:** (none)",
+  "- **Requirements:**",
+  "  - Initialize npm package",
+  "  - Configure TypeScript",
+  "- **TDD Phase:** Exempt",
+  "- **Complexity Score:** 2",
+  "",
+  "### Task 2: Core types",
+  "",
+  "- **Creates:** `src/types.ts`",
+  "- **Modifies:** (none)",
+  "- **Depends on:** Task 1",
+  "- **Requirements:**",
+  "  - Define shared interfaces",
+  "  - Export all types",
+  "- **TDD Phase:** RED → GREEN",
+  "- **Complexity Score:** 3",
+  "",
+  "---",
+  "",
+  "## Phase 2: Implementation",
+  "",
+  "### Task 3: Parser module",
+  "",
+  "- **Creates:** `src/parser.ts`",
+  "- **Modifies:** (none)",
+  "- **Depends on:** Task 2",
+  "- **Requirements:**",
+  "  - Parse manifest markdown",
+  "  - Return Task array",
+  "- **TDD Phase:** RED → GREEN",
+  "- **Complexity Score:** 4",
+  "",
+  "### Task 4: Integration",
+  "",
+  "- **Creates:** (none)",
+  "- **Modifies:** `src/cli.ts`",
+  "- **Depends on:** Task 2, Task 3",
+  "- **Requirements:**",
+  "  - Wire parser into CLI",
+  "- **TDD Phase:** Exempt",
+  "- **Complexity Score:** 3",
+].join("\n");
 
 // ─── formatSubagentHints ─────────────────────────────────────────────────────
 
@@ -534,7 +621,9 @@ describe("buildArchitectBrief", () => {
     const task = makeTask();
     const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
-    expect(brief).not.toContain("Phase");
+    expect(brief).not.toContain("Phase 1: Implement");
+    expect(brief).not.toContain("Phase 2: Verify");
+    expect(brief).not.toContain("Phase 3: Code Review");
     expect(brief).not.toContain("Commit message");
   });
 
@@ -550,6 +639,26 @@ describe("buildArchitectBrief", () => {
     const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
 
     expect(brief).toContain("feat/brief");
+  });
+
+  it("includes tool usage constraints", () => {
+    const task = makeTask();
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Tool Usage Constraints");
+    expect(brief).toContain("Do NOT use Bash to execute project code");
+    expect(brief).toContain("node_modules is never installed in worktrees");
+  });
+
+  it("tool constraints appear after explore targets and before plan output", () => {
+    const task = makeTask({ explore: ["How auth works"] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    const constraintIdx = brief.indexOf("Tool Usage Constraints");
+    const exploreIdx = brief.indexOf("How auth works");
+    const planOutputIdx = brief.indexOf("### Plan Output");
+    expect(constraintIdx).toBeGreaterThan(exploreIdx);
+    expect(constraintIdx).toBeLessThan(planOutputIdx);
   });
 });
 
@@ -869,5 +978,533 @@ describe("shell anti-patterns inclusion", () => {
     const brief = buildArchitectBrief(task, [task], "/fake/project", "", "# Manifest", "feat/brief");
 
     expect(brief).not.toContain("# Shell Anti-Patterns");
+  });
+});
+
+// ─── buildManifestExcerpt ────────────────────────────────────────────────────
+
+describe("buildManifestExcerpt", () => {
+  it("includes the task's own entry", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("### Task 3: Parser module");
+    expect(result).toContain("Parse manifest markdown");
+  });
+
+  it("includes direct dependency entries", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("### Task 2: Core types");
+    expect(result).toContain("Define shared interfaces");
+  });
+
+  it("includes header sections", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("## Tech Stack");
+    expect(result).toContain("Node.js 22+");
+    expect(result).toContain("## Testing Strategy");
+    expect(result).toContain("All src/ modules have Vitest tests");
+  });
+
+  it("includes one-line summary with total task count", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("4 tasks");
+  });
+
+  it("excludes unrelated tasks", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).not.toContain("### Task 1: Setup scaffolding");
+    expect(result).not.toContain("### Task 4: Integration");
+  });
+
+  it("works with tasks that have no dependencies", () => {
+    const task = makeTask({ id: 1, dependsOn: [] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("### Task 1: Setup scaffolding");
+    expect(result).not.toContain("### Task 2");
+    expect(result).not.toContain("### Task 3");
+    expect(result).not.toContain("### Task 4");
+  });
+
+  it("includes only direct dependencies, not transitive", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    // Task 2 depends on Task 1, but task 3 only directly depends on task 2
+    expect(result).toContain("### Task 2:");
+    expect(result).not.toContain("### Task 1:");
+  });
+
+  it("returns empty string for empty manifest", () => {
+    const task = makeTask();
+    const result = buildManifestExcerpt(task, "");
+
+    expect(result).toBe("");
+  });
+
+  it("handles manifest with no task entries gracefully", () => {
+    const task = makeTask();
+    const result = buildManifestExcerpt(task, "# Simple Manifest\nSome content");
+
+    expect(result).toContain("# Simple Manifest");
+    expect(result).toContain("Some content");
+  });
+
+  it("summary line omits phase when task ID is not in manifest", () => {
+    const task = makeTask({ id: 99, dependsOn: [] });
+    const result = buildManifestExcerpt(task, TEST_MANIFEST);
+
+    expect(result).toContain("4 tasks");
+    expect(result).not.toContain("Phase 1");
+    expect(result).not.toContain("Phase 2");
+  });
+});
+
+// ─── Manifest excerpt integration ────────────────────────────────────────────
+
+describe("manifest excerpt integration", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("architect brief uses manifest excerpt, excludes unrelated tasks", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design", TEST_MANIFEST, "feat/brief");
+
+    expect(brief).toContain("### Task 3: Parser module");
+    expect(brief).toContain("### Task 2: Core types");
+    expect(brief).not.toContain("### Task 1: Setup scaffolding");
+    expect(brief).not.toContain("### Task 4: Integration");
+  });
+
+  it("implementation brief uses manifest excerpt, excludes unrelated tasks", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design", TEST_MANIFEST, "feat/brief");
+
+    expect(brief).toContain("### Task 3: Parser module");
+    expect(brief).toContain("### Task 2: Core types");
+    expect(brief).not.toContain("### Task 1: Setup scaffolding");
+    expect(brief).not.toContain("### Task 4: Integration");
+  });
+
+  it("architect brief still includes design doc verbatim", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const brief = buildArchitectBrief(task, [task], "/fake/project", "# Design Doc\nFull design content here.", TEST_MANIFEST, "feat/brief");
+
+    expect(brief).toContain("## Design Document");
+    expect(brief).toContain("Full design content here.");
+  });
+
+  it("briefs handle empty manifest without error", () => {
+    const task = makeTask({ id: 3, dependsOn: [2] });
+    const architectBrief = buildArchitectBrief(task, [task], "/fake/project", "# Design", "", "feat/brief");
+    const implBrief = buildImplementationBrief(task, [task], "/fake/project", "# Design", "", "feat/brief");
+
+    expect(architectBrief).not.toContain("## Task Manifest");
+    expect(implBrief).not.toContain("## Task Manifest");
+  });
+});
+
+// ─── appendMemorySnapshot regex — S{id} entries ──────────────────────────────
+
+describe("appendMemorySnapshot — S{id} entries", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+  });
+
+  it("includes memory when it contains ## S1 session entries", () => {
+    const memoryContent = "# Liteboard Memory Log\n\n## S1 - Types/config - 2026-03-13\nCompleted session S1.\n";
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
+
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Build Memory");
+    expect(brief).toContain("## S1 - Types/config");
+    expect(brief).toContain("Completed session S1.");
+  });
+
+  it("includes memory when it contains both ## T{id} and ## S{id} entries", () => {
+    const memoryContent = "# Liteboard Memory Log\n\n## T5 - Setup - 2026-03-10\nOld task.\n\n## S1 - Types - 2026-03-13\nNew session.\n";
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
+
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).toContain("Build Memory");
+    expect(brief).toContain("## T5 - Setup");
+    expect(brief).toContain("## S1 - Types");
+  });
+
+  it("omits memory when it has no ## T{id} or ## S{id} entries", () => {
+    const memoryContent = "# Liteboard Memory Log\n\nNo entries yet.\n";
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue(memoryContent);
+
+    const task = makeTask();
+    const brief = buildImplementationBrief(task, [task], "/fake/project", "# Design\nFull design content.", "# Manifest\nFull manifest content.", "feat/brief");
+
+    expect(brief).not.toContain("Build Memory");
+  });
+});
+
+// ─── buildSessionArchitectBrief ──────────────────────────────────────────────
+
+describe("buildSessionArchitectBrief", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("starts with architect-orientation.md content", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    const lines = brief.split("\n");
+    expect(lines[0]).toBe("# Architect Orientation");
+  });
+
+  it("includes session ID in plan output instruction", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S2", tasks: [task], focus: "Core types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS2-session-plan.md");
+    expect(brief).toMatch(/[Ww]rite.*plan/);
+  });
+
+  it("includes session focus in task context line", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Session S1: Types and config");
+  });
+
+  it("includes all task titles in the brief", () => {
+    const task1 = makeTask({ id: 1, title: "Setup types" });
+    const task2 = makeTask({ id: 2, title: "Setup config" });
+    const session = makeSession({ id: "S1", tasks: [task1, task2], focus: "Foundation" });
+    const brief = buildSessionArchitectBrief(session, [task1, task2], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Task 1: Setup types");
+    expect(brief).toContain("Task 2: Setup config");
+  });
+
+  it("includes all task requirements in the brief", () => {
+    const task = makeTask({
+      id: 1,
+      title: "Setup types",
+      requirements: ["Define Task interface", "Export all types"],
+    });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Define Task interface");
+    expect(brief).toContain("Export all types");
+  });
+
+  it("includes memory entry path in rules with session ID", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S3", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS3-memory-entry.md");
+  });
+
+  it("includes tool usage constraints", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Tool Usage Constraints");
+    expect(brief).toContain("Do NOT use Bash to execute project code");
+  });
+
+  it("does NOT include implementation phases or commit messages", () => {
+    const task = makeTask({ id: 1, title: "Setup types", commitMessage: "feat: setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionArchitectBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).not.toContain("Phase 1: Implement");
+    expect(brief).not.toContain("Phase 2: Verify");
+    expect(brief).not.toContain("Commit message");
+    expect(brief).not.toContain("feat: setup types");
+  });
+});
+
+// ─── buildSessionImplementationBrief ─────────────────────────────────────────
+
+describe("buildSessionImplementationBrief", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("starts with agent-orientation.md content", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    const lines = brief.split("\n");
+    expect(lines[0]).toBe("# Agent Orientation");
+  });
+
+  it("includes session ID in plan path", () => {
+    const task = makeTask({ id: 1, title: "Setup types", complexity: 3 });
+    const session = makeSession({ id: "S2", tasks: [task], focus: "Core types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS2-session-plan.md");
+  });
+
+  it("skips plan path when all tasks have complexity <= LOW_COMPLEXITY_THRESHOLD", () => {
+    const task = makeTask({ id: 1, title: "Setup types", complexity: 1 });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).not.toContain("session-plan.md");
+  });
+
+  it("includes session focus in task context line", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types and config" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Session S1: Types and config");
+  });
+
+  it("includes all task titles in the brief", () => {
+    const task1 = makeTask({ id: 1, title: "Setup types" });
+    const task2 = makeTask({ id: 2, title: "Setup config" });
+    const session = makeSession({ id: "S1", tasks: [task1, task2], focus: "Foundation" });
+    const brief = buildSessionImplementationBrief(session, [task1, task2], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Task 1: Setup types");
+    expect(brief).toContain("Task 2: Setup config");
+  });
+
+  it("includes commit messages for each task", () => {
+    const task1 = makeTask({ id: 1, title: "Setup types", commitMessage: "feat: add types" });
+    const task2 = makeTask({ id: 2, title: "Setup config", commitMessage: "feat: add config" });
+    const session = makeSession({ id: "S1", tasks: [task1, task2], focus: "Foundation" });
+    const brief = buildSessionImplementationBrief(session, [task1, task2], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("feat: add types");
+    expect(brief).toContain("feat: add config");
+  });
+
+  it("includes all task requirements in the brief", () => {
+    const task = makeTask({
+      id: 1,
+      title: "Setup types",
+      requirements: ["Define Task interface", "Export all types"],
+    });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("Define Task interface");
+    expect(brief).toContain("Export all types");
+  });
+
+  it("includes memory entry path in rules with session ID", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S4", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/sS4-memory-entry.md");
+  });
+
+  it("includes TDD instruction when session has TDD tasks", () => {
+    const task = makeTask({ id: 1, title: "Setup types", tddPhase: "RED → GREEN" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("This session contains TDD tasks");
+    expect(brief).toContain("RED");
+    expect(brief).toContain("GREEN");
+  });
+
+  it("uses TDD-Exempt message when no task has a TDD phase", () => {
+    const task = makeTask({ id: 1, title: "Setup types", tddPhase: "Exempt" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("TDD-Exempt");
+    expect(brief).not.toContain("This session contains TDD tasks");
+  });
+
+  it("includes session-review and code-reviewer but NOT plan-review", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("# Session Review");
+    expect(brief).toContain("# Code Reviewer");
+    expect(brief).not.toContain("# Plan Review");
+  });
+
+  it("includes feature branch in rules", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionImplementationBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/my-feature");
+
+    expect(brief).toContain("feat/my-feature");
+  });
+});
+
+// ─── buildSessionBrief dispatcher ────────────────────────────────────────────
+
+describe("buildSessionBrief dispatcher", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubReadFileSync();
+    (readMemorySnapshot as ReturnType<typeof vi.fn>).mockReturnValue("");
+  });
+
+  it("dispatches to implementation brief for non-QA sessions", () => {
+    const task = makeTask({ id: 1, title: "Setup types" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "Types" });
+    const brief = buildSessionBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("# Agent Orientation");
+    expect(brief).not.toContain("# QA Agent");
+  });
+
+  it("dispatches to QA brief when all tasks have type qa", () => {
+    const task = makeTask({ id: 1, title: "Validate feature", type: "qa" });
+    const session = makeSession({ id: "S1", tasks: [task], focus: "QA" });
+    const brief = buildSessionBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("# QA Agent");
+  });
+
+  it("uses session-scoped qa-report path (not task-scoped) for QA sessions", () => {
+    const task = makeTask({ id: 9, title: "Validate integration", type: "qa" });
+    const session = makeSession({ id: "3", tasks: [task], focus: "Final QA" });
+    const brief = buildSessionBrief(session, [task], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    expect(brief).toContain("/fake/project/artifacts/s3-qa-report.md");
+    expect(brief).not.toContain("/fake/project/artifacts/t9-qa-report.md");
+  });
+
+  it("dispatches to implementation brief when session has mixed task types", () => {
+    const implTask = makeTask({ id: 1, title: "Implement feature" });
+    const qaTask = makeTask({ id: 2, title: "QA feature", type: "qa" });
+    const session = makeSession({ id: "S1", tasks: [implTask, qaTask], focus: "Mixed" });
+    const brief = buildSessionBrief(session, [implTask, qaTask], "/fake/project", "# Design\nContent.", "# Manifest\nContent.", "feat/branch");
+
+    // Not all tasks are QA, so uses implementation brief
+    expect(brief).toContain("# Agent Orientation");
+  });
+});
+
+// ─── Worktree Isolation Section ──────────────────────────────────────────────
+
+describe("worktree isolation section", () => {
+  beforeEach(() => {
+    stubReadFileSync();
+    vi.mocked(readMemorySnapshot).mockReturnValue(null);
+  });
+
+  describe("buildSessionArchitectBrief", () => {
+    it("includes isolation section when worktreePath is provided", () => {
+      const task = makeTask({ id: 1, title: "Plan feature" });
+      const session = makeSession({ id: "S1", tasks: [task], focus: "Plan" });
+      const brief = buildSessionArchitectBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s1",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s1");
+      expect(brief).toContain("NEVER run git commands from that path");
+      expect(brief).toContain("/fake/project/artifacts");
+    });
+
+    it("omits isolation section when worktreePath is undefined", () => {
+      const task = makeTask({ id: 1, title: "Plan feature" });
+      const session = makeSession({ id: "S1", tasks: [task], focus: "Plan" });
+      const brief = buildSessionArchitectBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+      );
+
+      expect(brief).not.toContain("## Working Directory Isolation");
+    });
+  });
+
+  describe("buildSessionImplementationBrief", () => {
+    it("includes isolation section when worktreePath is provided", () => {
+      const task = makeTask({ id: 2, title: "Build feature" });
+      const session = makeSession({ id: "S2", tasks: [task], focus: "Implement" });
+      const brief = buildSessionImplementationBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s2",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s2");
+      expect(brief).toContain("ALL code changes, builds, tests, and git commands MUST run from this directory");
+    });
+
+    it("omits isolation section when worktreePath is undefined", () => {
+      const task = makeTask({ id: 2, title: "Build feature" });
+      const session = makeSession({ id: "S2", tasks: [task], focus: "Implement" });
+      const brief = buildSessionImplementationBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+      );
+
+      expect(brief).not.toContain("## Working Directory Isolation");
+    });
+  });
+
+  describe("buildSessionBrief", () => {
+    it("threads worktreePath to QA brief for QA sessions", () => {
+      const task = makeTask({ id: 3, title: "Validate", type: "qa" });
+      const session = makeSession({ id: "S3", tasks: [task], focus: "QA" });
+      const brief = buildSessionBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s3",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s3");
+    });
+
+    it("threads worktreePath to implementation brief for non-QA sessions", () => {
+      const task = makeTask({ id: 4, title: "Build thing" });
+      const session = makeSession({ id: "S4", tasks: [task], focus: "Impl" });
+      const brief = buildSessionBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+        undefined, undefined, "/tmp/worktrees/feat-branch-s4",
+      );
+
+      expect(brief).toContain("## Working Directory Isolation");
+      expect(brief).toContain("/tmp/worktrees/feat-branch-s4");
+    });
+
+    it("omits isolation when worktreePath is undefined (backward compat)", () => {
+      const task = makeTask({ id: 5, title: "Build thing" });
+      const session = makeSession({ id: "S5", tasks: [task], focus: "Impl" });
+      const brief = buildSessionBrief(
+        session, [task], "/fake/project", "", "", "feat/branch",
+      );
+
+      expect(brief).not.toContain("## Working Directory Isolation");
+    });
   });
 });

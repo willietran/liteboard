@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { Task, TddPhase } from "./types.js";
+import type { Task, TddPhase, Session, SessionStatus } from "./types.js";
 
 const VALID_TDD_PHASES: ReadonlySet<string> = new Set([
   "RED", "GREEN", "RED \u2192 GREEN", "RED \u2192 GREEN \u2192 REFACTOR", "Exempt",
@@ -101,6 +101,8 @@ export function parseManifest(manifestPath: string): Task[] {
     }
     const type = typeStr === "qa" ? "qa" as const : undefined;
 
+    const suggestedSession = parseSingleValue(section, "Suggested Session") || undefined;
+
     const task: Task = {
       id: headers[i].id,
       title: headers[i].title,
@@ -118,6 +120,7 @@ export function parseManifest(manifestPath: string): Task[] {
       turnCount: 0,
       lastLine: "",
       bytesReceived: 0,
+      ...(suggestedSession ? { suggestedSession } : {}),
     };
 
     tasks.push(task);
@@ -140,6 +143,111 @@ function normalizeTddPhase(raw: string): TddPhase {
     if (upper === valid.toUpperCase()) return valid as TddPhase;
   }
   return "";
+}
+
+// ─── Session Hints Table Parser ───────────────────────────────────────────────
+
+/**
+ * Searches for a markdown table under a header containing "Session"
+ * (e.g. "## Session-Grouping Hints") and extracts session ID → focus string.
+ * Returns empty map if no table is found.
+ */
+function parseSessionHintsTable(content: string): Map<string, string> {
+  // Find a heading that contains "Session"
+  const headingMatch = content.match(/^#{1,3}\s+.*[Ss]ession.*$/m);
+  if (!headingMatch) return new Map();
+
+  const afterHeading = content.slice(headingMatch.index! + headingMatch[0].length);
+
+  // Find the first markdown table after the heading
+  const tableMatch = afterHeading.match(/(\|[^\n]+\|\n)+/);
+  if (!tableMatch) return new Map();
+
+  const tableText = tableMatch[0];
+  const rows = tableText.split("\n").filter((r) => r.trim().startsWith("|") && r.trim().endsWith("|"));
+  if (rows.length < 2) return new Map();
+
+  // Parse header row to find column indices
+  const headerCells = rows[0].split("|").map((c) => c.trim()).filter(Boolean);
+  const focusColIndex = headerCells.findIndex((h) => h.toLowerCase() === "focus");
+  // Session ID is always column 0
+  const sessionColIndex = 0;
+
+  const result = new Map<string, string>();
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i].trim();
+    // Skip separator rows (e.g., |---|---|)
+    if (/^\|[-| :]+\|$/.test(row)) continue;
+
+    const cells = row.split("|").map((c) => c.trim()).filter(Boolean);
+    const sessionId = cells[sessionColIndex];
+    if (!sessionId) continue;
+
+    const focus = focusColIndex >= 0 && cells[focusColIndex]
+      ? cells[focusColIndex]
+      : cells[cells.length - 1] ?? "";
+
+    result.set(sessionId, focus);
+  }
+
+  return result;
+}
+
+// ─── parseSessions ────────────────────────────────────────────────────────────
+
+/**
+ * Groups tasks into sessions based on their suggestedSession hint.
+ * Tasks without a hint get an auto-generated single-task session.
+ */
+export function parseSessions(
+  tasks: Task[],
+  manifest: string,
+): Session[] {
+  const hintsTable = parseSessionHintsTable(manifest);
+
+  // Group tasks by their session key
+  const groups = new Map<string, Task[]>();
+  for (const task of tasks) {
+    const key = task.suggestedSession ?? `S-auto-T${task.id}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(task);
+    } else {
+      groups.set(key, [task]);
+    }
+  }
+
+  const sessions: Session[] = [];
+
+  for (const [id, groupTasks] of groups) {
+    const complexity = groupTasks.reduce((sum, t) => sum + t.complexity, 0);
+    const focus = hintsTable.get(id) ?? groupTasks.map((t) => t.title).join(", ");
+    const anyBlocked = groupTasks.some((t) => t.status === "blocked");
+    const status: SessionStatus = anyBlocked ? "blocked" : "queued";
+
+    sessions.push({
+      id,
+      tasks: groupTasks,
+      complexity,
+      focus,
+      status,
+      bytesReceived: 0,
+      turnCount: 0,
+      lastLine: "",
+      stage: "",
+      attemptCount: 0,
+    });
+  }
+
+  // Sort sessions by smallest task id in each session for stable ordering
+  sessions.sort((a, b) => {
+    const minA = Math.min(...a.tasks.map((t) => t.id));
+    const minB = Math.min(...b.tasks.map((t) => t.id));
+    return minA - minB;
+  });
+
+  return sessions;
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────────

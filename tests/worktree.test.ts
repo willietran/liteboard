@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Task } from "../src/types.js";
+import type { Session } from "../src/types.js";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +40,7 @@ import {
   cleanupAllWorktrees,
   cleanupStaleWorktrees,
   getWorktreePath,
+  recreateWorktreeFromBranch,
 } from "../src/worktree.js";
 
 const mockExec = vi.mocked(execFileSync);
@@ -48,21 +49,17 @@ const mockRm = vi.mocked(rmSync);
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
-function makeTask(partial: Partial<Task> & { id: number }): Task {
+function makeSession(partial: Partial<Session> & { id: string }): Session {
   return {
-    title: `Task ${partial.id}`,
-    creates: [],
-    modifies: [],
-    dependsOn: [],
-    requirements: [],
-    tddPhase: "GREEN",
-    commitMessage: "",
+    tasks: [],
     complexity: 1,
-    status: "blocked",
-    stage: "",
+    focus: `Session ${partial.id}`,
+    status: "queued",
+    bytesReceived: 0,
     turnCount: 0,
     lastLine: "",
-    bytesReceived: 0,
+    stage: "",
+    attemptCount: 0,
     ...partial,
   };
 }
@@ -169,17 +166,17 @@ describe("setupFeatureBranch", () => {
 // ─── createWorktree ─────────────────────────────────────────────────────────
 
 describe("createWorktree", () => {
-  it("creates worktree at /tmp/liteboard-<slug>-t<taskId>", () => {
+  it("creates worktree at /tmp/liteboard-<slug>-s<sessionId>", () => {
     mockExists.mockReturnValue(false);
     // branch delete attempt (stale cleanup)
     mockExec.mockImplementation(() => Buffer.from(""));
 
-    const path = createWorktree("my-proj", 7, "feat/cool", false);
+    const path = createWorktree("my-proj", "7", "feat/cool", false);
 
-    expect(path).toBe("/tmp/liteboard-my-proj-t7");
+    expect(path).toBe("/tmp/liteboard-my-proj-s7");
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["worktree", "add", "/tmp/liteboard-my-proj-t7", "-b", "feat/cool-t7", "feat/cool"],
+      ["worktree", "add", "/tmp/liteboard-my-proj-s7", "-b", "feat/cool-s7", "feat/cool"],
       expect.anything(),
     );
   });
@@ -188,52 +185,70 @@ describe("createWorktree", () => {
     mockExists.mockReturnValue(true);
     mockExec.mockImplementation(() => Buffer.from(""));
 
-    createWorktree("my-proj", 3, "feat/cool", false);
+    createWorktree("my-proj", "3", "feat/cool", false);
 
     // Should remove existing worktree first
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["worktree", "remove", "/tmp/liteboard-my-proj-t3", "--force"],
+      ["worktree", "remove", "/tmp/liteboard-my-proj-s3", "--force"],
       expect.anything(),
     );
     // Then should remove the directory
-    expect(mockRm).toHaveBeenCalledWith("/tmp/liteboard-my-proj-t3", {
+    expect(mockRm).toHaveBeenCalledWith("/tmp/liteboard-my-proj-s3", {
       recursive: true,
       force: true,
     });
   });
 
-  it("deletes stale task branch before creating", () => {
+  it("deletes stale session branch before creating", () => {
     mockExists.mockReturnValue(false);
     mockExec.mockImplementation(() => Buffer.from(""));
 
-    createWorktree("my-proj", 5, "feat/cool", false);
+    createWorktree("my-proj", "5", "feat/cool", false);
 
-    // Should try to delete the task branch first
+    // Should try to delete the session branch first
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["branch", "-D", "feat/cool-t5"],
+      ["branch", "-D", "feat/cool-s5"],
       expect.anything(),
     );
+  });
+
+  it("runs worktree prune before deleting stale session branch", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    createWorktree("my-proj", "5", "feat/cool", false);
+
+    const calls = mockExec.mock.calls
+      .filter(c => c[0] === "git")
+      .map(c => c[1] as string[]);
+
+    const pruneIdx = calls.findIndex(c => c[0] === "worktree" && c[1] === "prune");
+    const branchDeleteIdx = calls.findIndex(c => c[0] === "branch" && c[1] === "-D");
+
+    expect(pruneIdx).toBeGreaterThan(-1);
+    expect(branchDeleteIdx).toBeGreaterThan(-1);
+    expect(pruneIdx).toBeLessThan(branchDeleteIdx);
   });
 });
 
 // ─── cleanupWorktree ────────────────────────────────────────────────────────
 
 describe("cleanupWorktree", () => {
-  it("removes worktree and deletes task branch", () => {
+  it("removes worktree and deletes session branch", () => {
     mockExec.mockReturnValue(Buffer.from(""));
 
-    cleanupWorktree("my-proj", 2, "feat/cool", false);
+    cleanupWorktree("my-proj", "2", "feat/cool", false);
 
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["worktree", "remove", "/tmp/liteboard-my-proj-t2", "--force"],
+      ["worktree", "remove", "/tmp/liteboard-my-proj-s2", "--force"],
       expect.anything(),
     );
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["branch", "-D", "feat/cool-t2"],
+      ["branch", "-D", "feat/cool-s2"],
       expect.anything(),
     );
   });
@@ -244,96 +259,188 @@ describe("cleanupWorktree", () => {
     });
 
     expect(() =>
-      cleanupWorktree("my-proj", 2, "feat/cool", false),
+      cleanupWorktree("my-proj", "2", "feat/cool", false),
     ).not.toThrow();
   });
 
-  it("preserves task branch when preserveBranch is true", () => {
+  it("preserves session branch when preserveBranch is true", () => {
     mockExec.mockReturnValue(Buffer.from(""));
 
-    cleanupWorktree("my-proj", 2, "feat/cool", false, { preserveBranch: true });
+    cleanupWorktree("my-proj", "2", "feat/cool", false, { preserveBranch: true });
 
     // Worktree should still be removed
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["worktree", "remove", "/tmp/liteboard-my-proj-t2", "--force"],
+      ["worktree", "remove", "/tmp/liteboard-my-proj-s2", "--force"],
       expect.anything(),
     );
     // Branch should NOT be deleted
     expect(mockExec).not.toHaveBeenCalledWith(
       "git",
-      ["branch", "-D", "feat/cool-t2"],
+      ["branch", "-D", "feat/cool-s2"],
       expect.anything(),
     );
   });
 
-  it("deletes task branch when preserveBranch is false", () => {
+  it("deletes session branch when preserveBranch is false", () => {
     mockExec.mockReturnValue(Buffer.from(""));
 
-    cleanupWorktree("my-proj", 2, "feat/cool", false, { preserveBranch: false });
+    cleanupWorktree("my-proj", "2", "feat/cool", false, { preserveBranch: false });
 
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["branch", "-D", "feat/cool-t2"],
+      ["branch", "-D", "feat/cool-s2"],
       expect.anything(),
     );
+  });
+
+  it("runs worktree prune before deleting session branch", () => {
+    mockExec.mockReturnValue(Buffer.from(""));
+
+    cleanupWorktree("my-proj", "2", "feat/cool", false);
+
+    const calls = mockExec.mock.calls
+      .filter(c => c[0] === "git")
+      .map(c => c[1] as string[]);
+
+    const pruneIdx = calls.findIndex(c => c[0] === "worktree" && c[1] === "prune");
+    const branchDeleteIdx = calls.findIndex(c => c[0] === "branch" && c[1] === "-D");
+
+    expect(pruneIdx).toBeGreaterThan(-1);
+    expect(branchDeleteIdx).toBeGreaterThan(-1);
+    expect(pruneIdx).toBeLessThan(branchDeleteIdx);
+  });
+
+  it("skips worktree prune when preserveBranch is true", () => {
+    mockExec.mockReturnValue(Buffer.from(""));
+
+    cleanupWorktree("my-proj", "2", "feat/cool", false, { preserveBranch: true });
+
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "git",
+      ["worktree", "prune"],
+      expect.anything(),
+    );
+  });
+});
+
+// ─── recreateWorktreeFromBranch ──────────────────────────────────────────────
+
+describe("recreateWorktreeFromBranch", () => {
+  it("creates worktree from existing branch without -b flag", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    recreateWorktreeFromBranch("my-proj", "7", "feat/cool", false);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "/tmp/liteboard-my-proj-s7", "feat/cool-s7"],
+      expect.anything(),
+    );
+    // Must NOT have been called with -b flag
+    const addCalls = mockExec.mock.calls
+      .filter(c => c[0] === "git" && (c[1] as string[])[0] === "worktree" && (c[1] as string[])[1] === "add");
+    for (const call of addCalls) {
+      expect(call[1] as string[]).not.toContain("-b");
+    }
+  });
+
+  it("returns correct worktree path", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    const p = recreateWorktreeFromBranch("my-proj", "7", "feat/cool", false);
+
+    expect(p).toBe("/tmp/liteboard-my-proj-s7");
+  });
+
+  it("cleans up stale worktree if path exists", () => {
+    mockExists.mockReturnValue(true);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    recreateWorktreeFromBranch("my-proj", "3", "feat/cool", false);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "remove", "/tmp/liteboard-my-proj-s3", "--force"],
+      expect.anything(),
+    );
+    expect(mockRm).toHaveBeenCalledWith("/tmp/liteboard-my-proj-s3", { recursive: true, force: true });
+    expect(mockExec).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "/tmp/liteboard-my-proj-s3", "feat/cool-s3"],
+      expect.anything(),
+    );
+  });
+
+  it("does not delete the existing branch (preserves commits)", () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation(() => Buffer.from(""));
+
+    recreateWorktreeFromBranch("my-proj", "5", "feat/cool", false);
+
+    const branchDeleteCalls = mockExec.mock.calls.filter(
+      c => c[0] === "git" && (c[1] as string[])[0] === "branch" && (c[1] as string[])[1] === "-D",
+    );
+    expect(branchDeleteCalls).toHaveLength(0);
   });
 });
 
 // ─── cleanupAllWorktrees ────────────────────────────────────────────────────
 
 describe("cleanupAllWorktrees", () => {
-  it("cleans up all task worktrees", () => {
-    const tasks: Task[] = [
-      makeTask({ id: 1 }),
-      makeTask({ id: 2 }),
-      makeTask({ id: 3 }),
+  it("cleans up all session worktrees", () => {
+    const sessions: Session[] = [
+      makeSession({ id: "1" }),
+      makeSession({ id: "2" }),
+      makeSession({ id: "3" }),
     ];
     mockExec.mockReturnValue(Buffer.from(""));
 
-    cleanupAllWorktrees(tasks, "proj", "feat/x", false);
+    cleanupAllWorktrees(sessions, "proj", "feat/x", false);
 
-    // Should attempt worktree remove for each task
-    for (const t of tasks) {
+    // Should attempt worktree remove for each session
+    for (const s of sessions) {
       expect(mockExec).toHaveBeenCalledWith(
         "git",
-        ["worktree", "remove", `/tmp/liteboard-proj-t${t.id}`, "--force"],
+        ["worktree", "remove", `/tmp/liteboard-proj-s${s.id}`, "--force"],
         expect.anything(),
       );
       expect(mockExec).toHaveBeenCalledWith(
         "git",
-        ["branch", "-D", `feat/x-t${t.id}`],
+        ["branch", "-D", `feat/x-s${s.id}`],
         expect.anything(),
       );
     }
   });
 
-  it("preserves branches of merge-failed tasks when preserveFailedBranches is true", () => {
-    const tasks: Task[] = [
-      makeTask({ id: 1, status: "done", lastLine: "" }),
-      makeTask({ id: 2, status: "failed", lastLine: "[MERGE FAILED] conflict in src/index.ts" }),
-      makeTask({ id: 3, status: "failed", lastLine: "[EXIT 1]" }),
+  it("preserves branches of merge-failed sessions when preserveFailedBranches is true", () => {
+    const sessions: Session[] = [
+      makeSession({ id: "1", status: "done", lastLine: "" }),
+      makeSession({ id: "2", status: "failed", lastLine: "[MERGE FAILED] conflict in src/index.ts" }),
+      makeSession({ id: "3", status: "failed", lastLine: "[EXIT 1]" }),
     ];
     mockExec.mockReturnValue(Buffer.from(""));
 
-    cleanupAllWorktrees(tasks, "proj", "feat/x", false, { preserveFailedBranches: true });
+    cleanupAllWorktrees(sessions, "proj", "feat/x", false, { preserveFailedBranches: true });
 
-    // Task 1 (done): branch should be deleted
+    // Session 1 (done): branch should be deleted
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["branch", "-D", "feat/x-t1"],
+      ["branch", "-D", "feat/x-s1"],
       expect.anything(),
     );
-    // Task 2 (merge-failed): branch should be preserved
+    // Session 2 (merge-failed): branch should be preserved
     expect(mockExec).not.toHaveBeenCalledWith(
       "git",
-      ["branch", "-D", "feat/x-t2"],
+      ["branch", "-D", "feat/x-s2"],
       expect.anything(),
     );
-    // Task 3 (failed but NOT merge failure): branch should be deleted
+    // Session 3 (failed but NOT merge failure): branch should be deleted
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["branch", "-D", "feat/x-t3"],
+      ["branch", "-D", "feat/x-s3"],
       expect.anything(),
     );
   });
@@ -345,8 +452,8 @@ describe("cleanupStaleWorktrees", () => {
   it("removes orphan worktrees matching pattern", () => {
     const worktreeList = [
       "/Users/me/project  abc1234 [main]",
-      "/tmp/liteboard-proj-t1  def5678 [feat/x-t1]",
-      "/tmp/liteboard-proj-t5  ghi9012 [feat/x-t5]",
+      "/tmp/liteboard-proj-s1  def5678 [feat/x-s1]",
+      "/tmp/liteboard-proj-s5  ghi9012 [feat/x-s5]",
     ].join("\n");
 
     mockExec.mockReturnValueOnce(Buffer.from(worktreeList));
@@ -362,12 +469,12 @@ describe("cleanupStaleWorktrees", () => {
     );
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["worktree", "remove", "/tmp/liteboard-proj-t1", "--force"],
+      ["worktree", "remove", "/tmp/liteboard-proj-s1", "--force"],
       expect.anything(),
     );
     expect(mockExec).toHaveBeenCalledWith(
       "git",
-      ["worktree", "remove", "/tmp/liteboard-proj-t5", "--force"],
+      ["worktree", "remove", "/tmp/liteboard-proj-s5", "--force"],
       expect.anything(),
     );
   });
@@ -377,6 +484,6 @@ describe("cleanupStaleWorktrees", () => {
 
 describe("getWorktreePath", () => {
   it("returns correct path", () => {
-    expect(getWorktreePath("my-proj", 42)).toBe("/tmp/liteboard-my-proj-t42");
+    expect(getWorktreePath("my-proj", "42")).toBe("/tmp/liteboard-my-proj-s42");
   });
 });

@@ -2,28 +2,33 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Task, CLIArgs } from "./types.js";
-import { defaultModelConfig, LOW_COMPLEXITY_THRESHOLD } from "./types.js";
-import { parseManifest } from "./parser.js";
-import { topologicalSort, hasFileConflict } from "./resolver.js";
+import type { Session, Task, CLIArgs, SessionRunnerContext } from "./types.js";
+import { defaultModelConfig } from "./types.js";
+import { parseManifest, parseSessions } from "./parser.js";
+import { resolveSessionDependencies, hasSessionFileConflict } from "./resolver.js";
 import { writeProgress, readProgress, detectCompletedFromGitLog } from "./progress.js";
-import { appendMemoryEntry } from "./memory.js";
-import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, checkOllamaModel, pullOllamaModel, getProviderEnv } from "./provider.js";
+import { createProvider, validateOllamaBaseUrl, checkOllamaHealth, checkOllamaModel, pullOllamaModel } from "./provider.js";
 import { parseProjectConfig, validateConfig, hasOllamaProvider, applyOllamaFallback } from "./config.js";
 import {
   setupFeatureBranch,
-  createWorktree,
   cleanupWorktree,
   cleanupAllWorktrees,
   cleanupStaleWorktrees,
   getWorktreePath,
 } from "./worktree.js";
-import { squashMerge } from "./merger.js";
-import { spawnAgent } from "./spawner.js";
+import {
+  gatherDecisionContext,
+  askTriage,
+  executeTriageAction,
+  writeDecisionRecord,
+} from "./triage.js";
 import { renderStatus, isTTY, setForcePipeMode, HIDE_CURSOR, SHOW_CURSOR, ENTER_ALT_SCREEN, EXIT_ALT_SCREEN } from "./dashboard.js";
-import { buildBrief, buildArchitectBrief, buildImplementationBrief } from "./brief.js";
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
+import {
+  spawnSession,
+  handleMergingSession,
+} from "./task-runner.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -211,13 +216,83 @@ function ensureGitignores(projectDir: string): void {
   if (fs.existsSync(repoGitignore)) {
     const content = fs.readFileSync(repoGitignore, "utf-8");
     const additions: string[] = [];
-    if (!content.includes(".brief-t")) additions.push(".brief-t*.md");
+    if (!content.includes(".brief-s")) additions.push(".brief-s*.md");
     if (!content.includes(".memory-entry")) additions.push(".memory-entry.md");
     if (!content.includes(".qa-report")) additions.push(".qa-report.md");
     if (additions.length > 0) {
       fs.appendFileSync(repoGitignore, "\n" + additions.join("\n") + "\n", "utf-8");
     }
   }
+}
+
+// ─── Dry-Run Helpers ──────────────────────────────────────────────────────
+
+/** Computes the critical path through session dependencies (longest chain by complexity sum). */
+function computeCriticalPath(sessions: Session[], sessionDeps: Map<string, string[]>): string[] {
+  if (sessions.length === 0) return [];
+  const sessionMap = new Map(sessions.map(s => [s.id, s]));
+  const memo = new Map<string, number>();
+
+  function pathCost(id: string): number {
+    if (memo.has(id)) return memo.get(id)!;
+    const s = sessionMap.get(id);
+    if (!s) { memo.set(id, 0); return 0; }
+    const deps = sessionDeps.get(id) ?? [];
+    const maxDepCost = deps.reduce((max, d) => Math.max(max, pathCost(d)), 0);
+    const cost = s.complexity + maxDepCost;
+    memo.set(id, cost);
+    return cost;
+  }
+
+  for (const s of sessions) pathCost(s.id);
+
+  let maxCost = -1;
+  let endId = sessions[0].id;
+  for (const s of sessions) {
+    const cost = memo.get(s.id) ?? 0;
+    if (cost > maxCost) { maxCost = cost; endId = s.id; }
+  }
+
+  const chain: string[] = [];
+  let current: string | null = endId;
+  const visited = new Set<string>();
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    chain.unshift(current);
+    const deps: string[] = sessionDeps.get(current) ?? [];
+    if (deps.length === 0) break;
+    let nextId: string = deps[0];
+    let nextCost = memo.get(deps[0]) ?? 0;
+    for (const depId of deps.slice(1)) {
+      const c = memo.get(depId) ?? 0;
+      if (c > nextCost) { nextCost = c; nextId = depId; }
+    }
+    current = nextId;
+  }
+  return chain;
+}
+
+/** Groups sessions into waves — sessions in the same wave can run concurrently. */
+function computeWaves(sessions: Session[], sessionDeps: Map<string, string[]>): string[][] {
+  const waveMap = new Map<string, number>();
+
+  function getWave(id: string): number {
+    if (waveMap.has(id)) return waveMap.get(id)!;
+    const deps = sessionDeps.get(id) ?? [];
+    const wave = deps.length === 0 ? 0 : Math.max(...deps.map(d => getWave(d))) + 1;
+    waveMap.set(id, wave);
+    return wave;
+  }
+
+  for (const s of sessions) getWave(s.id);
+
+  const grouped = new Map<number, string[]>();
+  for (const [id, wave] of waveMap) {
+    if (!grouped.has(wave)) grouped.set(wave, []);
+    grouped.get(wave)!.push(id);
+  }
+  const maxWave = waveMap.size > 0 ? Math.max(...waveMap.values()) : -1;
+  return Array.from({ length: maxWave + 1 }, (_, i) => grouped.get(i) ?? []);
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────
@@ -229,7 +304,6 @@ async function main(): Promise<void> {
   const slug = path.basename(args.projectPath);
   const manifestPath = path.join(args.projectPath, "manifest.md");
   const designPath = path.join(args.projectPath, "design.md");
-
 
   // Load and merge config.json (before checkPrereqs so Ollama health check has config)
   const configPath = path.join(args.projectPath, "config.json");
@@ -272,75 +346,159 @@ async function main(): Promise<void> {
   const tasks = parseManifest(manifestPath);
   if (tasks.length === 0) die("No tasks found in manifest.");
 
-  // Apply task filter
+  const allTasks = tasks;
   let filteredTasks = tasks;
+
+  // Apply task filter
   if (args.taskFilter) {
     const filterSet = new Set(args.taskFilter);
     filteredTasks = tasks.filter(t => filterSet.has(t.id));
     if (filteredTasks.length === 0) die("No tasks match the filter.");
-    // Adjust: tasks not in filter that are deps should be treated as done
     for (const t of filteredTasks) {
       t.dependsOn = t.dependsOn.filter(d => filterSet.has(d));
-      if (t.dependsOn.length === 0 && t.status === "blocked") {
-        t.status = "queued";
-      }
+      if (t.dependsOn.length === 0 && t.status === "blocked") t.status = "queued";
     }
   }
 
-  // Resolve dependency layers
-  const layers = topologicalSort(filteredTasks);
+  // Build sessions
+  let filteredSessions = parseSessions(filteredTasks, manifestContent);
+  const allSessions = parseSessions(allTasks, manifestContent);
+  const sessionDeps = resolveSessionDependencies(filteredSessions);
 
-  // Dry-run: show graph and exit
+  // Dry-run: show rich session-oriented execution plan and exit
   if (args.dryRun) {
-    console.log("\n\x1b[1mDependency Layers:\x1b[0m\n");
-    for (const layer of layers) {
-      const taskNames = layer.taskIds
-        .map(id => {
-          const t = filteredTasks.find(t => t.id === id);
-          return t ? `T${t.id}: ${t.title}` : `T${id}`;
-        })
-        .join(", ");
-      console.log(`  Layer ${layer.layerIndex}: ${taskNames}`);
+    const totalTasks = filteredSessions.reduce((sum, s) => sum + s.tasks.length, 0);
+    const tddCount = filteredSessions.reduce(
+      (sum, s) => sum + s.tasks.filter(t => t.tddPhase && t.tddPhase !== "Exempt").length,
+      0,
+    );
+    const BAR   = "═".repeat(54);
+    const RULER = "━".repeat(54);
+    const LINE  = "─".repeat(54);
+
+    console.log(`\n${BAR}`);
+    console.log(`EXECUTION PLAN  (concurrency=${args.concurrency})`);
+    console.log(`${BAR}`);
+    console.log(`  Project:  ${args.projectPath}`);
+    console.log(`  Branch:   ${args.branch}`);
+    console.log(`  Sessions: ${filteredSessions.length}   Tasks: ${totalTasks}   TDD: ${tddCount}`);
+
+    for (const session of filteredSessions) {
+      const isQa = session.tasks.some(t => t.type === "qa");
+      const deps = sessionDeps.get(session.id) ?? [];
+      console.log(isQa
+        ? `\nSession ${session.id} — ${session.focus} ${RULER}`
+        : `\nSession ${session.id} — ${session.focus}`);
+      for (const task of session.tasks) {
+        const prefix   = task.type === "qa" ? "[Q]" : "[ ]";
+        const tddLabel = task.type === "qa" ? "QA Gate" : (task.tddPhase || "Exempt");
+        console.log(`  ${prefix} ${"T" + task.id}`.padEnd(9) + `${task.title}`.padEnd(46) + `C:${task.complexity}  ${tddLabel}`);
+      }
+      if (deps.length > 0) console.log(`            depends on: ${deps.join(", ")}`);
+      if (isQa) console.log(RULER);
     }
-    console.log(`\n  Total: ${filteredTasks.length} tasks, ${layers.length} layers`);
-    console.log(`  Max parallelism: ${Math.max(...layers.map(l => l.taskIds.length))}\n`);
+
+    console.log(`\n${LINE}`);
+    console.log("  Agent config (from config.json):");
+    for (const role of ["architect", "implementation", "qa"] as const) {
+      const cfg = args.models[role];
+      console.log(`    ${(role + ":").padEnd(17)} ${cfg.provider} / ${cfg.model}`);
+    }
+    const trCfg = projectConfig.triage ?? { provider: "claude", model: "claude-sonnet-4-6" };
+    console.log(`    ${"triage:".padEnd(17)} ${trCfg.provider} / ${trCfg.model}`);
+
+    console.log(`\n${LINE}`);
+    console.log("  Worktree plan:");
+    for (const session of filteredSessions) {
+      console.log(`    ${getWorktreePath(slug, session.id)}`);
+    }
+
+    const cp = computeCriticalPath(filteredSessions, sessionDeps);
+    console.log(`\n${LINE}`);
+    console.log(`  Critical path:  ${cp.join(" → ")}`);
+
+    const parallelWaves = computeWaves(filteredSessions, sessionDeps).filter(w => w.length > 1);
+    if (parallelWaves.length > 0) {
+      console.log(`\n${LINE}`);
+      console.log("  Parallelism opportunities:");
+      for (const wave of parallelWaves) {
+        console.log(`    Concurrent: ${wave.join(", ")}`);
+      }
+    }
+
+    console.log();
     process.exit(0);
   }
 
   // Startup cleanup
   cleanupStaleWorktrees(slug, args.verbose);
 
-  // Clean up artifacts from previous runs
-  const artDir = artifactsDir(args.projectPath);
-  if (fs.existsSync(artDir)) {
-    for (const f of fs.readdirSync(artDir)) {
-      if (f === ".gitignore") continue;
-      try { fs.unlinkSync(path.join(artDir, f)); } catch {}
-    }
-  }
-
   // Resume detection
   const previousProgress = readProgress(args.projectPath);
-  const gitCompleted = detectCompletedFromGitLog(args.branch, filteredTasks, args.verbose);
+  const gitCompleted = detectCompletedFromGitLog(args.branch, allTasks, args.verbose);
 
-  for (const t of filteredTasks) {
-    if (previousProgress.has(t.id) || gitCompleted.has(t.id)) {
+  // Apply task-level resume
+  for (const t of allTasks) {
+    const progressEntry = previousProgress.tasks.get(t.id);
+    if (progressEntry?.status === "needs_human") {
+      t.status = "needs_human";
+    } else if (progressEntry?.status === "done") {
       t.status = "done";
-      t.completedAt = previousProgress.get(t.id) || new Date().toISOString();
+      t.completedAt = progressEntry.completedAt;
+    } else if (gitCompleted.has(t.id)) {
+      t.status = "done";
+      t.completedAt = new Date().toISOString();
     }
   }
 
-  // Unblock tasks whose deps are all done
-  function updateStatuses(): void {
-    const taskById = new Map(filteredTasks.map(t => [t.id, t]));
-    for (const t of filteredTasks) {
-      if (t.status === "blocked") {
-        const allDepsDone = t.dependsOn.every(depId => {
-          const dep = taskById.get(depId);
-          return dep?.status === "done";
-        });
-        if (allDepsDone) t.status = "queued";
+  // Apply session-level resume
+  for (const s of filteredSessions) {
+    const sessionEntry = previousProgress.sessions.get(s.id);
+    if (sessionEntry?.status === "needs_human") {
+      s.status = "needs_human";
+    } else if (sessionEntry?.status === "done") {
+      s.status = "done";
+      s.completedAt = sessionEntry.completedAt;
+      // Also mark constituent tasks as done
+      for (const t of s.tasks) {
+        if (t.status !== "done") {
+          t.status = "done";
+          t.completedAt = sessionEntry.completedAt;
+        }
       }
+    }
+  }
+
+  // Unblock sessions whose deps are all done
+  function updateStatuses(): void {
+    // Build lookup maps for O(1) dep resolution
+    const taskById = new Map<number, Task>();
+    for (const t of allTasks) taskById.set(t.id, t);
+    const sessionById = new Map<string, Session>();
+    for (const s of filteredSessions) sessionById.set(s.id, s);
+
+    // Update task statuses within sessions
+    for (const s of filteredSessions) {
+      for (const t of s.tasks) {
+        if (t.status === "blocked") {
+          const allDepsDone = t.dependsOn.every(depId => {
+            const dep = taskById.get(depId);
+            return dep?.status === "done";
+          });
+          if (allDepsDone) t.status = "queued";
+        }
+      }
+    }
+
+    // Update session statuses based on session-level deps
+    for (const s of filteredSessions) {
+      if (s.status !== "queued" && s.status !== "blocked") continue;
+      const deps = sessionDeps.get(s.id) ?? [];
+      const allDepsDone = deps.every(depId => {
+        const dep = sessionById.get(depId);
+        return dep?.status === "done";
+      });
+      s.status = allDepsDone ? "queued" : "blocked";
     }
   }
   updateStatuses();
@@ -352,18 +510,100 @@ async function main(): Promise<void> {
   const provider = createProvider("claude");
 
   // Active promises
-  const activePromises = new Map<number, Promise<void>>();
-  const qaReports = new Map<number, string>();
+  const activePromises = new Map<string, Promise<void>>();
+  const qaReports = new Map<string, string>();
   let shuttingDown = false;
 
   function printQAReports(): void {
     if (qaReports.size === 0) return;
     console.log("");
-    for (const [taskId, report] of qaReports) {
-      const task = filteredTasks.find(t => t.id === taskId);
-      const title = task?.title ?? "QA Validation";
-      console.log(`\x1b[1mT${taskId}: ${title}\x1b[0m`);
+    for (const [sessionId, report] of qaReports) {
+      const session = filteredSessions.find(s => s.id === sessionId);
+      const title = session?.focus ?? "QA Validation";
+      console.log(`\x1b[1mS${sessionId}: ${title}\x1b[0m`);
       console.log(report);
+    }
+  }
+
+  // ─── Session Runner Context ────────────────────────────────────────────────
+
+  const ctx: SessionRunnerContext = {
+    args,
+    slug,
+    filteredSessions,
+    allSessions,
+    allTasks,
+    designDoc,
+    manifestContent,
+    provider,
+    projectConfig,
+    activePromises,
+    qaReports,
+    updateStatuses,
+    sessionDeps,
+  };
+
+  // Startup validation: detect stale branches from previous runs and invoke triage
+  {
+    const existingBranches = new Set<string>();
+    try {
+      const branchList = git(["branch", "--list", `${args.branch}-s*`], { verbose: args.verbose });
+      for (const line of branchList.split("\n")) {
+        const name = line.trim().replace(/^\* /, "");
+        if (name) existingBranches.add(name);
+      }
+    } catch {}
+
+    for (const session of filteredSessions) {
+      if (session.status === "done" || session.status === "needs_human") continue;
+      const sessionBranch = session.branchName ?? `${args.branch}-s${session.id}`;
+      if (!existingBranches.has(sessionBranch)) continue;
+
+      // This session has a branch from a previous run but wasn't marked done
+      log(`Stale branch detected for S${session.id}, invoking triage for recovery assessment...`);
+      try {
+        const context = await gatherDecisionContext(
+          session, filteredSessions, args.branch, args.projectPath, args.concurrency,
+          { stage: "startup_validation", exitCode: -1 }, slug, args.verbose,
+        );
+        const decision = await askTriage(context, args.projectPath, projectConfig);
+        writeDecisionRecord(session.id, {
+          timestamp: new Date().toISOString(),
+          attemptNumber: context.state.attemptCount + 1,
+          trigger: {
+            stage: "startup_validation",
+            errorSummary: "Stale branch from previous run",
+          },
+          decision,
+        }, args.projectPath);
+        await executeTriageAction(
+          session, decision, context, slug, args.branch, args.projectPath, filteredSessions, args.verbose,
+        );
+
+        // Cleanup for terminal statuses only
+        const postTriageStatus = session.status as string;
+        if (postTriageStatus === "needs_human" || postTriageStatus === "merging") {
+          cleanupWorktree(slug, session.id, args.branch, args.verbose, { preserveBranch: true });
+        }
+      } catch (e) {
+        log(`Startup triage failed for S${session.id}: ${e instanceof Error ? e.message : String(e)}`);
+        // Don't block startup — let the session proceed normally
+      }
+    }
+    updateStatuses();
+  }
+
+  // Clean up per-run artifacts. Preserve durable triage files so that
+  // decision history and escalation notes survive across restarts.
+  {
+    const artDir = artifactsDir(args.projectPath);
+    if (fs.existsSync(artDir)) {
+      for (const f of fs.readdirSync(artDir)) {
+        if (f === ".gitignore") continue;
+        if (f.endsWith("-decisions.jsonl")) continue;
+        if (f.endsWith("-escalation.md")) continue;
+        try { fs.unlinkSync(path.join(artDir, f)); } catch {}
+      }
     }
   }
 
@@ -373,303 +613,95 @@ async function main(): Promise<void> {
     if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   });
   const dashboardInterval = setInterval(() => {
-    renderStatus(filteredTasks, args.projectPath);
+    renderStatus(filteredSessions, args.projectPath);
   }, 1000);
-  renderStatus(filteredTasks, args.projectPath);
+  renderStatus(filteredSessions, args.projectPath);
 
   // Graceful shutdown
   process.on("SIGINT", () => {
     shuttingDown = true;
-    log("\n\x1b[33mShutting down... waiting for running tasks (10s timeout)\x1b[0m");
+    log("\n\x1b[33mShutting down... waiting for running sessions (10s timeout)\x1b[0m");
 
     // Kill running agents
-    for (const t of filteredTasks) {
-      if (t.status === "running" && t.process) {
-        t.process.kill("SIGTERM");
+    for (const s of filteredSessions) {
+      if (s.status === "running" && s.process) {
+        s.process.kill("SIGTERM");
       }
     }
 
     setTimeout(() => {
       clearInterval(dashboardInterval);
       if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
-      cleanupAllWorktrees(filteredTasks, slug, args.branch, args.verbose, { preserveFailedBranches: true });
-      writeProgress(filteredTasks, args.projectPath);
+      cleanupAllWorktrees(filteredSessions, slug, args.branch, args.verbose, { preserveFailedBranches: true });
+      writeProgress(filteredSessions, allTasks, args.projectPath);
       process.exit(1);
     }, 10000);
   });
 
   // ─── Main Loop ──────────────────────────────────────────────────────
 
-  function spawnTask(task: Task): void {
-    task.status = "running";
-    task.startedAt = new Date().toISOString();
-
-    let wp: string;
-    try {
-      wp = createWorktree(slug, task.id, args.branch, args.verbose);
-      task.worktreePath = wp;
-    } catch (e: unknown) {
-      task.status = "failed";
-      task.stage = "";
-      task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
-      cleanupWorktree(slug, task.id, args.branch, args.verbose);
-      writeProgress(filteredTasks, args.projectPath);
-      updateStatuses();
-      return;
-    }
-
-    // Shared close handler for the final phase (implementation or QA)
-    const handleFinalClose = async (code: number | null, resolve: () => void) => {
-      if (code === 0) {
-        try {
-          // Read memory entry from artifacts directory
-          const memEntryPath = path.join(artifactsDir(args.projectPath), `t${task.id}-memory-entry.md`);
-          let memBody = "";
-          if (fs.existsSync(memEntryPath)) {
-            memBody = fs.readFileSync(memEntryPath, "utf-8");
-          }
-
-          // Check if task produced any changes to merge
-          let hasDiff = true;
-          try {
-            git(["diff", "--quiet", args.branch, `${args.branch}-t${task.id}`], { verbose: args.verbose });
-            hasDiff = false; // exit 0 = no diff
-          } catch {
-            // exit 1 = has diff (expected for implementation tasks)
-          }
-
-          if (!hasDiff) {
-            // No changes to merge (QA passed clean, or edge case)
-            if (memBody) {
-              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
-            }
-            task.status = "done";
-            task.stage = "";
-            task.completedAt = new Date().toISOString();
-          } else {
-            // Normal merge path
-            task.stage = "Merging";
-            await squashMerge(task.id, slug, args.branch, task.commitMessage, args.verbose);
-
-            // Append memory AFTER successful merge
-            if (memBody) {
-              await appendMemoryEntry(args.projectPath, task.id, task.title, memBody);
-            }
-
-            task.status = "done";
-            task.stage = "";
-            task.completedAt = new Date().toISOString();
-          }
-        } catch (e: unknown) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = `[MERGE FAILED] ${(e instanceof Error ? e.message : String(e)).slice(0, 100)}`;
-        }
-      } else {
-        task.status = "failed";
-        task.stage = "";
-        task.lastLine = task.lastLine || `[EXIT ${code}]`;
-      }
-
-      // Capture QA report from artifacts directory
-      if (task.type === "qa") {
-        const qaReportPath = path.join(artifactsDir(args.projectPath), `t${task.id}-qa-report.md`);
-        if (fs.existsSync(qaReportPath)) {
-          qaReports.set(task.id, fs.readFileSync(qaReportPath, "utf-8"));
-        }
-      }
-
-      // Cleanup worktree — preserve task branch on merge failure for recovery
-      const preserveBranch = task.status === "failed" && task.lastLine?.startsWith("[MERGE FAILED]");
-      cleanupWorktree(slug, task.id, args.branch, args.verbose, { preserveBranch });
-      if (preserveBranch) {
-        log(`Branch ${args.branch}-t${task.id} preserved for recovery.`);
-      }
-      writeProgress(filteredTasks, args.projectPath);
-      updateStatuses();
-      activePromises.delete(task.id);
-      resolve();
-    };
-
-    // QA tasks: single-phase spawn (no architect)
-    if (task.type === "qa") {
-      task.provider = args.models.qa.provider;
-      let child: ReturnType<typeof spawnAgent>;
-      try {
-        const brief = buildBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
-        const qaEnv = getProviderEnv(args.models.qa.provider, args.ollama);
-        child = spawnAgent(task, brief, provider, args.models.qa.model, wp, args.projectPath, args.verbose, qaEnv);
-        task.process = child;
-      } catch (e: unknown) {
-        task.status = "failed";
-        task.stage = "";
-        task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
-        cleanupWorktree(slug, task.id, args.branch, args.verbose);
-        writeProgress(filteredTasks, args.projectPath);
-        updateStatuses();
-        return;
-      }
-
-      const promise = new Promise<void>((resolve) => {
-        child.on("close", (code) => handleFinalClose(code, resolve));
-      });
-      activePromises.set(task.id, promise);
-      return;
-    }
-
-    // Low-complexity tasks: single-phase implementation (no architect)
-    if (task.complexity <= LOW_COMPLEXITY_THRESHOLD) {
-      task.provider = args.models.implementation.provider;
-      let child: ReturnType<typeof spawnAgent>;
-      try {
-        const brief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
-        const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
-        child = spawnAgent(task, brief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
-        task.process = child;
-      } catch (e: unknown) {
-        task.status = "failed";
-        task.stage = "";
-        task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
-        cleanupWorktree(slug, task.id, args.branch, args.verbose);
-        writeProgress(filteredTasks, args.projectPath);
-        updateStatuses();
-        return;
-      }
-
-      const promise = new Promise<void>((resolve) => {
-        child.on("close", (code) => handleFinalClose(code, resolve));
-      });
-      activePromises.set(task.id, promise);
-      return;
-    }
-
-    // Non-QA, higher-complexity tasks: two-phase architect → implementation
-    task.provider = args.models.architect.provider;
-    let architectChild: ReturnType<typeof spawnAgent>;
-    try {
-      const architectBrief = buildArchitectBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
-      const architectEnv = getProviderEnv(args.models.architect.provider, args.ollama);
-      architectChild = spawnAgent(task, architectBrief, provider, args.models.architect.model, wp, args.projectPath, args.verbose, architectEnv);
-      task.process = architectChild;
-    } catch (e: unknown) {
-      task.status = "failed";
-      task.stage = "";
-      task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
-      cleanupWorktree(slug, task.id, args.branch, args.verbose);
-      writeProgress(filteredTasks, args.projectPath);
-      updateStatuses();
-      return;
-    }
-
-    const promise = new Promise<void>((resolve) => {
-      architectChild.on("close", (architectCode) => {
-        if (architectCode !== 0) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = `[ARCHITECT EXIT ${architectCode}]`;
-          cleanupWorktree(slug, task.id, args.branch, args.verbose);
-          writeProgress(filteredTasks, args.projectPath);
-          updateStatuses();
-          activePromises.delete(task.id);
-          resolve();
-          return;
-        }
-
-        // Verify plan was written
-        const planPath = path.join(artifactsDir(args.projectPath), `t${task.id}-task-plan.md`);
-        if (!fs.existsSync(planPath)) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = "[ARCHITECT] No task plan produced";
-          cleanupWorktree(slug, task.id, args.branch, args.verbose);
-          writeProgress(filteredTasks, args.projectPath);
-          updateStatuses();
-          activePromises.delete(task.id);
-          resolve();
-          return;
-        }
-
-        // Reset task state for phase 2 handoff
-        task.stage = "";
-        task.lastLine = "";
-        task.bytesReceived = 0;
-        task.turnCount = 0;
-
-        // Rename architect log and brief for debugging
-        const logDir = path.join(args.projectPath, "logs");
-        try { fs.renameSync(path.join(logDir, `t${task.id}.jsonl`), path.join(logDir, `t${task.id}-architect.jsonl`)); } catch {}
-        const artPath = artifactsDir(args.projectPath);
-        try { fs.renameSync(path.join(artPath, `t${task.id}-brief.md`), path.join(artPath, `t${task.id}-architect-brief.md`)); } catch {}
-
-        // Phase 2: Implementation
-        task.provider = args.models.implementation.provider;
-        try {
-          const implBrief = buildImplementationBrief(task, filteredTasks, args.projectPath, designDoc, manifestContent, args.branch, args.models, provider);
-          const implEnv = getProviderEnv(args.models.implementation.provider, args.ollama);
-          const implChild = spawnAgent(task, implBrief, provider, args.models.implementation.model, wp, args.projectPath, args.verbose, implEnv);
-          task.process = implChild; // Dashboard + stall detection now tracks implementation process
-
-          implChild.on("close", (code) => handleFinalClose(code, resolve));
-        } catch (e: unknown) {
-          task.status = "failed";
-          task.stage = "";
-          task.lastLine = `[SETUP FAILED] ${e instanceof Error ? e.message : String(e)}`.slice(0, 120);
-          cleanupWorktree(slug, task.id, args.branch, args.verbose);
-          writeProgress(filteredTasks, args.projectPath);
-          updateStatuses();
-          activePromises.delete(task.id);
-          resolve();
-        }
-      });
-    });
-
-    activePromises.set(task.id, promise);
-  }
-
-  // Loop until all tasks are done/failed or stuck
   while (!shuttingDown) {
     updateStatuses();
 
-    const runningTasks = filteredTasks.filter(t => t.status === "running");
-    const queuedTasks = filteredTasks.filter(t => t.status === "queued");
-    const blockedTasks = filteredTasks.filter(t => t.status === "blocked");
-    const doneTasks = filteredTasks.filter(t => t.status === "done");
-    const failedTasks = filteredTasks.filter(t => t.status === "failed");
+    const runningSessions = filteredSessions.filter(s => s.status === "running");
+    const queuedSessions = filteredSessions.filter(s => s.status === "queued");
+    const blockedSessions = filteredSessions.filter(s => s.status === "blocked");
 
-    // Check completion
-    if (runningTasks.length === 0 && queuedTasks.length === 0) {
-      if (blockedTasks.length > 0) {
-        log("\x1b[31mStuck: blocked tasks remain but nothing is running or queued.\x1b[0m");
-        const taskById = new Map(filteredTasks.map(t => [t.id, t]));
-        for (const t of blockedTasks) {
-          const missingDeps = t.dependsOn.filter(d => {
-            const dep = taskById.get(d);
-            return dep && dep.status === "failed";
+    // Handle sessions in "merging" state (set by retry_merge_only or mark_done)
+    const mergingSessions = filteredSessions.filter(
+      s => s.status === "merging" && !activePromises.has(s.id),
+    );
+    for (const session of mergingSessions) {
+      const mergePromise = handleMergingSession(ctx, session);
+      activePromises.set(session.id, mergePromise);
+    }
+
+    // Check completion — nothing running, queued, or in-flight
+    if (runningSessions.length === 0 && queuedSessions.length === 0) {
+      // Wait for in-flight merge/triage promises before exiting
+      if (activePromises.size > 0) {
+        await Promise.race(activePromises.values());
+        continue; // Re-check statuses after promise completes
+      }
+
+      if (blockedSessions.length > 0) {
+        log("\x1b[31mStuck: blocked sessions remain but nothing is running or queued.\x1b[0m");
+        const sessionById = new Map(filteredSessions.map(s => [s.id, s]));
+        for (const s of blockedSessions) {
+          const deps = sessionDeps.get(s.id) ?? [];
+          const failedDeps = deps.filter(depId => {
+            const dep = sessionById.get(depId);
+            return dep && (dep.status === "failed" || dep.status === "needs_human");
           });
-          if (missingDeps.length > 0) {
-            log(`  T${t.id} blocked by failed: ${missingDeps.map(d => `T${d}`).join(", ")}`);
+          if (failedDeps.length > 0) {
+            log(`  S${s.id} blocked by: ${failedDeps.map(depId => {
+              const dep = sessionById.get(depId);
+              return `S${depId} (${dep?.status})`;
+            }).join(", ")}`);
           }
         }
       }
       break;
     }
 
-    // Spawn queued tasks up to concurrency limit
-    if (activePromises.size < args.concurrency && queuedTasks.length > 0) {
-      const spawnedThisIteration: Task[] = [];
-      for (const task of queuedTasks) {
+    // Spawn queued sessions up to concurrency limit
+    if (activePromises.size < args.concurrency && queuedSessions.length > 0) {
+      const spawnedThisIteration: Session[] = [];
+      for (const session of queuedSessions) {
         if (activePromises.size >= args.concurrency) break;
 
-        // Check file conflicts with running tasks and those spawned earlier this iteration
-        const hasConflict = [...runningTasks, ...spawnedThisIteration].some(rt => hasFileConflict(task, rt));
+        // Check file conflicts with running sessions and those spawned earlier this iteration
+        const hasConflict = [...runningSessions, ...spawnedThisIteration].some(
+          rs => hasSessionFileConflict(session, rs),
+        );
         if (hasConflict) continue;
 
-        spawnTask(task);
-        spawnedThisIteration.push(task);
+        spawnSession(ctx, session);
+        spawnedThisIteration.push(session);
       }
     }
 
-    writeProgress(filteredTasks, args.projectPath);
+    writeProgress(filteredSessions, allTasks, args.projectPath);
 
     // Wait a bit before next iteration
     await new Promise(r => setTimeout(r, 2000));
@@ -682,24 +714,36 @@ async function main(): Promise<void> {
     await Promise.allSettled(activePromises.values());
   }
 
-  // Stop task dashboard
+  // Stop session dashboard
   clearInterval(dashboardInterval);
 
-  const done = filteredTasks.filter(t => t.status === "done").length;
-  const failed = filteredTasks.filter(t => t.status === "failed").length;
+  const doneSessions = filteredSessions.filter(s => s.status === "done").length;
+  const failedSessions = filteredSessions.filter(s => s.status === "failed").length;
+  const needsHumanCount = filteredSessions.filter(s => s.status === "needs_human").length;
+  const totalTasks = filteredSessions.reduce((sum, s) => sum + s.tasks.length, 0);
 
   if (isTTY()) process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   console.log("");
   console.log(`\x1b[1mLiteboard Complete\x1b[0m`);
 
-  if (failed > 0) {
-    console.log(`  \x1b[32m${done} done\x1b[0m, \x1b[31m${failed} failed\x1b[0m of ${filteredTasks.length} tasks`);
-    console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
+  if (failedSessions > 0 || needsHumanCount > 0) {
+    let summary = `  \x1b[32m${doneSessions} done\x1b[0m`;
+    if (failedSessions > 0) summary += `, \x1b[31m${failedSessions} failed\x1b[0m`;
+    if (needsHumanCount > 0) summary += `, \x1b[33m${needsHumanCount} needs human\x1b[0m`;
+    summary += ` of ${filteredSessions.length} sessions (${totalTasks} tasks)`;
+    console.log(summary);
+
+    if (failedSessions > 0) {
+      console.log(`  Check logs at ${args.projectPath}/logs/ for failure details.`);
+    }
+    if (needsHumanCount > 0) {
+      console.log(`  ${needsHumanCount} session(s) need human intervention — see artifacts/s<ID>-escalation.md`);
+    }
     printQAReports();
     process.exit(1);
   }
 
-  console.log(`  \x1b[32mAll ${done} tasks merged\x1b[0m`);
+  console.log(`  \x1b[32mAll ${doneSessions} sessions merged (${totalTasks} tasks)\x1b[0m`);
   console.log(`  Branch \x1b[36m${args.branch}\x1b[0m is ready for PR.`);
   printQAReports();
 

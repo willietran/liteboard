@@ -96,6 +96,7 @@ describe("ClaudeCodeProvider", () => {
         "--verbose",
         "--model",
         "sonnet",
+        "--disable-slash-commands",
       ]);
     });
 

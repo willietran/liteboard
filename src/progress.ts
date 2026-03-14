@@ -1,24 +1,34 @@
 import { writeFileSync, renameSync, readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import type { Task } from "./types.js";
+import type { Task, Session, ProgressEntry, SessionProgressEntry } from "./types.js";
 
 const PROGRESS_FILE = "progress.md";
 
 // ─── writeProgress ───────────────────────────────────────────────────────────
 
-export function writeProgress(tasks: Task[], projectDir: string): void {
+export function writeProgress(sessions: Session[], tasks: Task[], projectDir: string): void {
   const escPipe = (s: string) => s.replace(/\|/g, "\\|");
   const lines: string[] = [];
 
-  // Header
+  // Session table first
+  lines.push("## Sessions");
+  lines.push("| Session | Focus | Status | Completed At |");
+  lines.push("| --- | --- | --- | --- |");
+  for (const s of sessions) {
+    const completedAt = s.completedAt ?? "";
+    lines.push(`| ${s.id} | ${escPipe(s.focus)} | ${s.status} | ${completedAt} |`);
+  }
+
+  lines.push("");
+
+  // Task table second
+  lines.push("## Tasks");
   lines.push("| Task | Title | Status | Completed At | Failure Summary |");
   lines.push("| --- | --- | --- | --- | --- |");
-
-  // Rows
   for (const t of tasks) {
     const completedAt = t.completedAt ?? "";
-    const failureSummary = t.status === "failed" ? t.lastLine : "";
+    const failureSummary = t.status === "failed" || t.status === "needs_human" ? t.lastLine : "";
     lines.push(
       `| ${t.id} | ${escPipe(t.title)} | ${t.status} | ${completedAt} | ${escPipe(failureSummary)} |`,
     );
@@ -35,17 +45,86 @@ export function writeProgress(tasks: Task[], projectDir: string): void {
 
 // ─── readProgress ────────────────────────────────────────────────────────────
 
-export function readProgress(projectDir: string): Map<number, string> {
+export function readProgress(projectDir: string): {
+  tasks: Map<number, ProgressEntry>;
+  sessions: Map<string, SessionProgressEntry>;
+} {
   const filePath = join(projectDir, PROGRESS_FILE);
-  const result = new Map<number, string>();
+  const taskResult = new Map<number, ProgressEntry>();
+  const sessionResult = new Map<string, SessionProgressEntry>();
 
   if (!existsSync(filePath)) {
-    return result;
+    return { tasks: taskResult, sessions: sessionResult };
   }
 
   const content = readFileSync(filePath, "utf-8");
   const lines = content.split("\n");
 
+  // Detect format: new format has "## Sessions" header, old format does not
+  const hasSessionsHeader = lines.some((l) => l.trim() === "## Sessions");
+
+  if (!hasSessionsHeader) {
+    // Backward compat: old format — parse entire content as tasks table
+    parseTasksTable(lines, taskResult);
+    return { tasks: taskResult, sessions: sessionResult };
+  }
+
+  // New format: find sections by header
+  let inSessions = false;
+  let inTasks = false;
+  const sessionLines: string[] = [];
+  const taskLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.trim() === "## Sessions") {
+      inSessions = true;
+      inTasks = false;
+      continue;
+    }
+    if (line.trim() === "## Tasks") {
+      inTasks = true;
+      inSessions = false;
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      inSessions = false;
+      inTasks = false;
+      continue;
+    }
+    if (inSessions) sessionLines.push(line);
+    if (inTasks) taskLines.push(line);
+  }
+
+  parseSessionsTable(sessionLines, sessionResult);
+  parseTasksTable(taskLines, taskResult);
+
+  return { tasks: taskResult, sessions: sessionResult };
+}
+
+function parseSessionsTable(lines: string[], result: Map<string, SessionProgressEntry>): void {
+  // Skip header (line 0) and separator (line 1)
+  for (let i = 2; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !line.startsWith("|")) continue;
+
+    const cells = line.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|")).filter(Boolean);
+    // cells: [Session, Focus, Status, Completed At]
+    if (cells.length < 3) continue;
+
+    const sessionId = cells[0]; // e.g. "S1"
+    const status = cells[2];
+    const completedAt = cells[3] ?? "";
+
+    if (status === "done" && completedAt) {
+      result.set(sessionId, { status: "done", completedAt });
+    } else if (status === "needs_human") {
+      result.set(sessionId, { status: "needs_human" });
+    }
+    // "merging" → not added to result (re-queued on resume)
+  }
+}
+
+function parseTasksTable(lines: string[], result: Map<number, ProgressEntry>): void {
   // Skip header (line 0) and separator (line 1)
   for (let i = 2; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -60,11 +139,11 @@ export function readProgress(projectDir: string): Map<number, string> {
     const completedAt = cells[3];
 
     if (status === "done" && completedAt) {
-      result.set(taskId, completedAt);
+      result.set(taskId, { status: "done", completedAt });
+    } else if (status === "needs_human") {
+      result.set(taskId, { status: "needs_human" });
     }
   }
-
-  return result;
 }
 
 // ─── detectCompletedFromGitLog ───────────────────────────────────────────────

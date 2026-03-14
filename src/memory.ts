@@ -15,8 +15,8 @@ const serialize = createMutex();
 
 export async function appendMemoryEntry(
   projectDir: string,
-  taskId: number,
-  title: string,
+  sessionId: string,
+  focus: string,
   body: string,
 ): Promise<void> {
   return serialize(async () => {
@@ -34,7 +34,7 @@ export async function appendMemoryEntry(
 
     // Build the new entry
     const timestamp = new Date().toISOString();
-    const entry = `## T${taskId} - ${title} - ${timestamp}\n\n${body}\n\n`;
+    const entry = `## S${sessionId} - ${focus} - ${timestamp}\n\n${body}\n\n`;
 
     const content = existing + entry;
 

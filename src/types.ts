@@ -12,7 +12,9 @@ export type TaskStatus =
   | "queued"
   | "running"
   | "done"
-  | "failed";
+  | "failed"
+  | "needs_human"
+  | "merging";
 
 // ─── Task Stage ──────────────────────────────────────────────────────────
 
@@ -67,6 +69,9 @@ export interface Task {
   worktreePath?: string;
   logPath?: string;
   provider?: string;
+  skipArchitect?: boolean;
+  attemptCount?: number;
+  suggestedSession?: string;
 }
 
 // ─── Ollama Config ────────────────────────────────────────────────────────
@@ -121,13 +126,128 @@ export function defaultModelConfig(): ModelConfig {
   };
 }
 
+// ─── Simple Agent Config ──────────────────────────────────────────────────
+
+/** Agent config without subagents (used by triage). */
+export interface SimpleAgentConfig {
+  provider: string;
+  model: string;
+}
+
+/** Default model for the triage agent when no config is provided. */
+export const DEFAULT_TRIAGE_MODEL = "claude-sonnet-4-6";
+
 // ─── Project Config ───────────────────────────────────────────────────────
 
 export interface ProjectConfig {
   ollama?: OllamaConfig;
   agents: ModelConfig;
+  triage?: SimpleAgentConfig;
   concurrency: number;
   branch?: string;
+}
+
+// ─── Triage Types ────────────────────────────────────────────────────────
+
+export type FailureStage =
+  | "worktree_creation"
+  | "architect"
+  | "plan_validation"
+  | "implementation"
+  | "merge_conflict"
+  | "build_validation"
+  | "test_validation"
+  | "commit"
+  | "stall"
+  | "startup_validation";
+
+export type ErrorClass =
+  | "git_conflict"
+  | "test_failure"
+  | "build_failure"
+  | "type_error"
+  | "install_failure"
+  | "timeout"
+  | "stall"
+  | "missing_artifact"
+  | "unknown";
+
+export type TriageAction =
+  | "retry_from_scratch"
+  | "resume_from_branch"
+  | "retry_merge_only"
+  | "skip_and_continue"
+  | "escalate"
+  | "reuse_plan"
+  | "extend_timeout"
+  | "mark_done";
+
+export interface TriageDecision {
+  action: TriageAction;
+  reasoning: string;
+  details?: Record<string, string>;
+}
+
+export interface ActionDescription {
+  action: TriageAction;
+  description: string;
+  legalWhen: string;
+}
+
+export interface DecisionContext {
+  trigger: {
+    stage: FailureStage;
+    exitCode: number;
+    errorTail: string;
+    errorClass?: ErrorClass;
+  };
+  task: {
+    id: number;
+    title: string;
+    type: string;
+    tddPhase: TddPhase;
+    complexity: number;
+    requirements: string[];
+    files: string[];
+    blockedDownstream: number;
+  };
+  session: {
+    id: string;
+    totalTasks: number;
+    completedTasks: number;
+    remainingTasks: string[];
+    complexity: number;
+    taskTddPhases: { id: number; title: string; tddPhase: TddPhase }[];
+  };
+  state: {
+    branchExists: boolean;
+    commitsAhead: number;
+    diffStat: string;
+    worktreeExists: boolean;
+    worktreeClean: boolean;
+    planExists: boolean;
+    attemptCount: number;
+    runningTasks: number;
+    freeSlots: number;
+  };
+  history: DecisionRecord[];
+  actions: ActionDescription[];
+}
+
+export interface DecisionRecord {
+  timestamp: string;
+  attemptNumber: number;
+  trigger: {
+    stage: FailureStage;
+    errorClass?: ErrorClass;
+    errorSummary: string;
+  };
+  decision: TriageDecision;
+  outcome?: {
+    success: boolean;
+    resultStage?: FailureStage;
+    duration?: number;
+  };
 }
 
 // ─── Stream Events ────────────────────────────────────────────────────────
@@ -194,6 +314,69 @@ export interface BuildValidationResult {
   tscErrorCount: number;
   testFailCount: number;
   testPassCount: number;
+}
+
+// ─── Progress Entry ───────────────────────────────────────────────────────
+
+export type ProgressEntry =
+  | { status: "done"; completedAt: string }
+  | { status: "needs_human" };
+
+// ─── Session ──────────────────────────────────────────────────────────────
+
+export type SessionStatus =
+  | "queued"
+  | "blocked"
+  | "running"
+  | "merging"
+  | "done"
+  | "failed"
+  | "needs_human";
+
+export interface Session {
+  // Identity
+  id: string;
+  tasks: Task[];
+  complexity: number;
+  focus: string;
+
+  // Runtime state
+  status: SessionStatus;
+  process?: ChildProcess;
+  worktreePath?: string;
+  branchName?: string;
+  startedAt?: string;
+  completedAt?: string;
+  bytesReceived: number;
+  turnCount: number;
+  lastLine: string;
+  stage: string;
+  logPath?: string;
+  provider?: string;
+  attemptCount: number;
+  skipArchitect?: boolean;
+}
+
+export type SessionProgressEntry =
+  | { status: "done"; completedAt: string }
+  | { status: "needs_human" };
+
+// ─── Session Runner Context ───────────────────────────────────────────────
+
+export interface SessionRunnerContext {
+  args: CLIArgs;
+  slug: string;
+  filteredSessions: Session[];
+  allSessions: Session[];
+  allTasks: Task[];
+  designDoc: string;
+  manifestContent: string;
+  provider: Provider;
+  projectConfig: ProjectConfig;
+  activePromises: Map<string, Promise<void>>;
+  qaReports: Map<string, string>;
+  updateStatuses: () => void;
+  sessionDeps: Map<string, string[]>;
 }
 
 // ─── Dependency Layer ─────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ export class ClaudeCodeProvider implements Provider {
       "--verbose",
       "--model",
       opts.model,
+      "--disable-slash-commands",
     ];
 
     // Clone env and strip CLAUDECODE to prevent recursive invocation

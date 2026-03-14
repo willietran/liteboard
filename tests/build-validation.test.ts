@@ -287,6 +287,55 @@ describe("runBuildValidation — no test script", () => {
   });
 });
 
+// ─── skipTests option ─────────────────────────────────────────────────────────
+
+describe("runBuildValidation — skipTests option", () => {
+  it("skips test phase when skipTests is true even if test script exists", () => {
+    const result = runBuildValidation("/repo", { cleanInstall: false, skipTests: true });
+
+    expect(result.success).toBe(true);
+    const testCall = mockExec.mock.calls.find(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "test",
+    );
+    expect(testCall).toBeUndefined();
+  });
+
+  it("still runs install, tsc, and build when skipTests is true", () => {
+    runBuildValidation("/repo", { cleanInstall: false, skipTests: true });
+
+    const installCall = mockExec.mock.calls.find(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "install",
+    );
+    const tscCall = mockExec.mock.calls.find(
+      (c) => c[0] === "npx" && (c[1] as string[])[0] === "tsc",
+    );
+    const buildCall = mockExec.mock.calls.find(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "run",
+    );
+    expect(installCall).toBeDefined();
+    expect(tscCall).toBeDefined();
+    expect(buildCall).toBeDefined();
+  });
+
+  it("runs tests when skipTests is false", () => {
+    runBuildValidation("/repo", { cleanInstall: false, skipTests: false });
+
+    const testCall = mockExec.mock.calls.find(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "test",
+    );
+    expect(testCall).toBeDefined();
+  });
+
+  it("runs tests when skipTests is undefined (default)", () => {
+    runBuildValidation("/repo", { cleanInstall: false });
+
+    const testCall = mockExec.mock.calls.find(
+      (c) => c[0] === "npm" && (c[1] as string[])[0] === "test",
+    );
+    expect(testCall).toBeDefined();
+  });
+});
+
 // ─── Timeout ─────────────────────────────────────────────────────────────────
 
 describe("runBuildValidation — timeout", () => {

@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import type { ProjectConfig, ModelConfig } from "./types.js";
+import type { ProjectConfig, ModelConfig, SimpleAgentConfig } from "./types.js";
 import { defaultModelConfig } from "./types.js";
 
 // Logs to stderr — consistent with other modules (parser.ts, merger.ts, etc.).
@@ -11,6 +11,9 @@ const VALID_PROVIDERS = new Set(["claude", "ollama"]);
 
 /** Fallback model for subagents not present in defaults. */
 const DEFAULT_SUBAGENT_MODEL = "claude-sonnet-4-6";
+
+/** Default triage agent config — Sonnet for fast, cheap structured decisions. */
+const DEFAULT_TRIAGE_CONFIG: SimpleAgentConfig = { provider: "claude", model: "claude-sonnet-4-6" };
 
 /** Derive required subagents from defaults — single source of truth. */
 const REQUIRED_SUBAGENTS: Record<string, string[]> = Object.fromEntries(
@@ -27,7 +30,7 @@ const REQUIRED_SUBAGENTS: Record<string, string[]> = Object.fromEntries(
  */
 export function parseProjectConfig(configPath: string): ProjectConfig {
   const defaults = defaultModelConfig();
-  const result: ProjectConfig = { agents: defaults, concurrency: 1 };
+  const result: ProjectConfig = { agents: defaults, concurrency: 1, triage: { ...DEFAULT_TRIAGE_CONFIG } };
 
   if (!fs.existsSync(configPath)) return result;
 
@@ -74,6 +77,15 @@ export function parseProjectConfig(configPath: string): ProjectConfig {
         }
       }
     }
+
+    // Parse triage config (lifted from agents.triage to config.triage)
+    if (agents.triage && typeof agents.triage === "object") {
+      const src = agents.triage;
+      result.triage = {
+        provider: typeof src.provider === "string" ? src.provider : DEFAULT_TRIAGE_CONFIG.provider,
+        model: typeof src.model === "string" ? src.model : DEFAULT_TRIAGE_CONFIG.model,
+      };
+    }
   }
 
   return result;
@@ -99,6 +111,16 @@ export function validateConfig(config: ProjectConfig): void {
       }
     }
   }
+
+  // Validate triage config (separate from agent role iteration — no subagents)
+  if (config.triage) {
+    if (!VALID_PROVIDERS.has(config.triage.provider)) {
+      throw new Error(`Unknown provider '${config.triage.provider}'. Supported: claude, ollama.`);
+    }
+    if (config.triage.provider === "ollama" && !config.ollama) {
+      throw new Error("Agent 'triage' uses provider 'ollama' but no 'ollama' config section found.");
+    }
+  }
 }
 
 // ─── applyOllamaFallback ────────────────────────────────────────────────────
@@ -117,11 +139,16 @@ export function applyOllamaFallback(config: ProjectConfig): void {
       }
     }
   }
+  if (config.triage?.provider === "ollama") {
+    log("\x1b[33mWarning: Ollama unreachable. Falling back to Claude for triage.\x1b[0m");
+    config.triage = { ...DEFAULT_TRIAGE_CONFIG };
+  }
 }
 
 // ─── hasOllamaProvider ───────────────────────────────────────────────────────
 
-/** Returns true if any agent role uses the "ollama" provider. */
+/** Returns true if any agent role or the triage agent uses the "ollama" provider. */
 export function hasOllamaProvider(config: ProjectConfig): boolean {
-  return Object.values(config.agents).some(agent => agent.provider === "ollama");
+  return Object.values(config.agents).some(agent => agent.provider === "ollama")
+    || config.triage?.provider === "ollama";
 }

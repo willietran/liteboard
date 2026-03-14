@@ -21,7 +21,7 @@ describe("appendMemoryEntry concurrency (real fs)", () => {
     const count = 10;
     const promises: Promise<void>[] = [];
     for (let i = 1; i <= count; i++) {
-      promises.push(appendMemoryEntry(tmpDir, i, `Task ${i}`, `Body for task ${i}.`));
+      promises.push(appendMemoryEntry(tmpDir, String(i), `Session ${i} focus`, `Body for session ${i}.`));
     }
     await Promise.all(promises);
 
@@ -32,12 +32,12 @@ describe("appendMemoryEntry concurrency (real fs)", () => {
 
     // All entries present
     for (let i = 1; i <= count; i++) {
-      expect(content).toContain(`T${i} - Task ${i}`);
-      expect(content).toContain(`Body for task ${i}.`);
+      expect(content).toContain(`S${i} - Session ${i} focus`);
+      expect(content).toContain(`Body for session ${i}.`);
     }
 
     // Count entry headings — should be exactly `count`
-    const headings = content.match(/^## T\d+/gm);
+    const headings = content.match(/^## S\d+/gm);
     expect(headings).toHaveLength(count);
   });
 });
