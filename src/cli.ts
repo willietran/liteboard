@@ -14,6 +14,7 @@ import {
   cleanupWorktree,
   cleanupAllWorktrees,
   cleanupStaleWorktrees,
+  getWorktreePath,
 } from "./worktree.js";
 import {
   gatherDecisionContext,
@@ -225,6 +226,76 @@ function ensureGitignores(projectDir: string): void {
   }
 }
 
+// ─── Dry-Run Helpers ──────────────────────────────────────────────────────
+
+/** Computes the critical path through session dependencies (longest chain by complexity sum). */
+function computeCriticalPath(sessions: Session[], sessionDeps: Map<string, string[]>): string[] {
+  if (sessions.length === 0) return [];
+  const sessionMap = new Map(sessions.map(s => [s.id, s]));
+  const memo = new Map<string, number>();
+
+  function pathCost(id: string): number {
+    if (memo.has(id)) return memo.get(id)!;
+    const s = sessionMap.get(id);
+    if (!s) { memo.set(id, 0); return 0; }
+    const deps = sessionDeps.get(id) ?? [];
+    const maxDepCost = deps.reduce((max, d) => Math.max(max, pathCost(d)), 0);
+    const cost = s.complexity + maxDepCost;
+    memo.set(id, cost);
+    return cost;
+  }
+
+  for (const s of sessions) pathCost(s.id);
+
+  let maxCost = -1;
+  let endId = sessions[0].id;
+  for (const s of sessions) {
+    const cost = memo.get(s.id) ?? 0;
+    if (cost > maxCost) { maxCost = cost; endId = s.id; }
+  }
+
+  const chain: string[] = [];
+  let current: string | null = endId;
+  const visited = new Set<string>();
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    chain.unshift(current);
+    const deps: string[] = sessionDeps.get(current) ?? [];
+    if (deps.length === 0) break;
+    let nextId: string = deps[0];
+    let nextCost = memo.get(deps[0]) ?? 0;
+    for (const depId of deps.slice(1)) {
+      const c = memo.get(depId) ?? 0;
+      if (c > nextCost) { nextCost = c; nextId = depId; }
+    }
+    current = nextId;
+  }
+  return chain;
+}
+
+/** Groups sessions into waves — sessions in the same wave can run concurrently. */
+function computeWaves(sessions: Session[], sessionDeps: Map<string, string[]>): string[][] {
+  const waveMap = new Map<string, number>();
+
+  function getWave(id: string): number {
+    if (waveMap.has(id)) return waveMap.get(id)!;
+    const deps = sessionDeps.get(id) ?? [];
+    const wave = deps.length === 0 ? 0 : Math.max(...deps.map(d => getWave(d))) + 1;
+    waveMap.set(id, wave);
+    return wave;
+  }
+
+  for (const s of sessions) getWave(s.id);
+
+  const grouped = new Map<number, string[]>();
+  for (const [id, wave] of waveMap) {
+    if (!grouped.has(wave)) grouped.set(wave, []);
+    grouped.get(wave)!.push(id);
+  }
+  const maxWave = waveMap.size > 0 ? Math.max(...waveMap.values()) : -1;
+  return Array.from({ length: maxWave + 1 }, (_, i) => grouped.get(i) ?? []);
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -304,16 +375,68 @@ async function main(): Promise<void> {
   const allSessions = parseSessions(allTasks, manifestContent);
   const sessionDeps = resolveSessionDependencies(filteredSessions);
 
-  // Dry-run: show sessions and exit
+  // Dry-run: show rich session-oriented execution plan and exit
   if (args.dryRun) {
-    console.log("\n\x1b[1mSession Schedule:\x1b[0m\n");
-    for (const session of filteredSessions) {
-      const taskIds = session.tasks.map(t => `T${t.id}`).join(", ");
-      const layerIndex = session.tasks.length > 0 ? (taskLayerMap.get(session.tasks[0].id) ?? 0) : 0;
-      console.log(`  Session ${session.id} (Layer ${layerIndex}): ${session.focus} [${taskIds}]`);
-    }
     const totalTasks = filteredSessions.reduce((sum, s) => sum + s.tasks.length, 0);
-    console.log(`\n  Total: ${filteredSessions.length} sessions, ${totalTasks} tasks, ${layers.length} layers\n`);
+    const tddCount = filteredSessions.reduce(
+      (sum, s) => sum + s.tasks.filter(t => t.tddPhase && t.tddPhase !== "Exempt").length,
+      0,
+    );
+    const BAR   = "═".repeat(54);
+    const RULER = "━".repeat(54);
+    const LINE  = "─".repeat(54);
+
+    console.log(`\n${BAR}`);
+    console.log(`EXECUTION PLAN  (concurrency=${args.concurrency})`);
+    console.log(`${BAR}`);
+    console.log(`  Project:  ${args.projectPath}`);
+    console.log(`  Branch:   ${args.branch}`);
+    console.log(`  Sessions: ${filteredSessions.length}   Tasks: ${totalTasks}   TDD: ${tddCount}`);
+
+    for (const session of filteredSessions) {
+      const isQa = session.tasks.some(t => t.type === "qa");
+      const deps = sessionDeps.get(session.id) ?? [];
+      console.log(isQa
+        ? `\nSession ${session.id} — ${session.focus} ${RULER}`
+        : `\nSession ${session.id} — ${session.focus}`);
+      for (const task of session.tasks) {
+        const prefix   = task.type === "qa" ? "[Q]" : "[ ]";
+        const tddLabel = task.type === "qa" ? "QA Gate" : (task.tddPhase || "Exempt");
+        console.log(`  ${prefix} ${"T" + task.id}`.padEnd(9) + `${task.title}`.padEnd(46) + `C:${task.complexity}  ${tddLabel}`);
+      }
+      if (deps.length > 0) console.log(`            depends on: ${deps.join(", ")}`);
+      if (isQa) console.log(RULER);
+    }
+
+    console.log(`\n${LINE}`);
+    console.log("  Agent config (from config.json):");
+    for (const role of ["architect", "implementation", "qa"] as const) {
+      const cfg = args.models[role];
+      console.log(`    ${(role + ":").padEnd(17)} ${cfg.provider} / ${cfg.model}`);
+    }
+    const trCfg = projectConfig.triage ?? { provider: "claude", model: "claude-sonnet-4-6" };
+    console.log(`    ${"triage:".padEnd(17)} ${trCfg.provider} / ${trCfg.model}`);
+
+    console.log(`\n${LINE}`);
+    console.log("  Worktree plan:");
+    for (const session of filteredSessions) {
+      console.log(`    ${getWorktreePath(slug, session.id)}`);
+    }
+
+    const cp = computeCriticalPath(filteredSessions, sessionDeps);
+    console.log(`\n${LINE}`);
+    console.log(`  Critical path:  ${cp.join(" → ")}`);
+
+    const parallelWaves = computeWaves(filteredSessions, sessionDeps).filter(w => w.length > 1);
+    if (parallelWaves.length > 0) {
+      console.log(`\n${LINE}`);
+      console.log("  Parallelism opportunities:");
+      for (const wave of parallelWaves) {
+        console.log(`    Concurrent: ${wave.join(", ")}`);
+      }
+    }
+
+    console.log();
     process.exit(0);
   }
 

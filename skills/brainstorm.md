@@ -88,6 +88,10 @@ Default `config.json`:
       "subagents": {
         "qaFixer": { "model": "claude-opus-4-6" }
       }
+    },
+    "triage": {
+      "provider": "claude",
+      "model": "claude-sonnet-4-6"
     }
   },
   "concurrency": 1
