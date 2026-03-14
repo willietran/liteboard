@@ -85,12 +85,16 @@ import {
   classifyMergeError,
   cleanupAfterTriage,
   handleStallCallback,
+  handleMergingSession,
   invokeTriageForSession,
 } from "../src/task-runner.js";
 import type { SessionRunnerContext } from "../src/types.js";
 import { writeProgress } from "../src/progress.js";
 import { cleanupWorktree } from "../src/worktree.js";
+import { squashMerge } from "../src/merger.js";
 import { gatherDecisionContext, askTriage, executeTriageAction, writeDecisionRecord } from "../src/triage.js";
+
+const mockSquashMerge = vi.mocked(squashMerge);
 
 const mockCleanupWorktree = vi.mocked(cleanupWorktree);
 const mockWriteProgress = vi.mocked(writeProgress);
@@ -504,5 +508,108 @@ describe("invokeTriageForSession", () => {
       { stage: "test_validation", exitCode: 1, errorClass: "test_failure" },
       "test-proj", false,
     );
+  });
+});
+
+// ─── handleMergingSession — TDD-Exempt skipTests ──────────────────────────────
+
+describe("handleMergingSession", () => {
+  it("passes skipTests=true for TDD-Exempt session", async () => {
+    mockSquashMerge.mockResolvedValue(undefined);
+    const session = makeSession({
+      id: "s1",
+      status: "merging",
+      tasks: [
+        makeTask({ id: 1, title: "Setup DB", tddPhase: "Exempt" }),
+        makeTask({ id: 2, title: "Write schema", tddPhase: "Exempt" }),
+      ],
+    });
+    const ctx = makeCtx({ filteredSessions: [session] });
+    ctx.activePromises.set(session.id, Promise.resolve());
+
+    await handleMergingSession(ctx, session);
+
+    expect(mockSquashMerge).toHaveBeenCalledWith(
+      session, "feat/x", false, true,
+    );
+    expect(session.status).toBe("done");
+  });
+
+  it("passes skipTests=false for TDD session (GREEN phase)", async () => {
+    mockSquashMerge.mockResolvedValue(undefined);
+    const session = makeSession({
+      id: "s2",
+      status: "merging",
+      tasks: [
+        makeTask({ id: 1, title: "Implement feature", tddPhase: "GREEN" }),
+      ],
+    });
+    const ctx = makeCtx({ filteredSessions: [session] });
+    ctx.activePromises.set(session.id, Promise.resolve());
+
+    await handleMergingSession(ctx, session);
+
+    expect(mockSquashMerge).toHaveBeenCalledWith(
+      session, "feat/x", false, false,
+    );
+  });
+
+  it("passes skipTests=false for mixed TDD/Exempt session", async () => {
+    mockSquashMerge.mockResolvedValue(undefined);
+    const session = makeSession({
+      id: "s3",
+      status: "merging",
+      tasks: [
+        makeTask({ id: 1, title: "Exempt task", tddPhase: "Exempt" }),
+        makeTask({ id: 2, title: "TDD task", tddPhase: "RED" }),
+      ],
+    });
+    const ctx = makeCtx({ filteredSessions: [session] });
+    ctx.activePromises.set(session.id, Promise.resolve());
+
+    await handleMergingSession(ctx, session);
+
+    expect(mockSquashMerge).toHaveBeenCalledWith(
+      session, "feat/x", false, false,
+    );
+  });
+
+  it("passes skipTests=true when tasks have empty tddPhase", async () => {
+    mockSquashMerge.mockResolvedValue(undefined);
+    const session = makeSession({
+      id: "s4",
+      status: "merging",
+      tasks: [
+        makeTask({ id: 1, title: "No TDD", tddPhase: "" }),
+      ],
+    });
+    const ctx = makeCtx({ filteredSessions: [session] });
+    ctx.activePromises.set(session.id, Promise.resolve());
+
+    await handleMergingSession(ctx, session);
+
+    expect(mockSquashMerge).toHaveBeenCalledWith(
+      session, "feat/x", false, true,
+    );
+  });
+
+  it("invokes triage on merge failure", async () => {
+    mockSquashMerge.mockRejectedValue(new Error("Test suite failed for session s5"));
+    const context = makeDecisionContext();
+    mockGatherDecisionContext.mockResolvedValue(context);
+    mockAskTriage.mockResolvedValue({ action: "escalate", reasoning: "cannot fix" });
+
+    const session = makeSession({
+      id: "s5",
+      status: "merging",
+      tasks: [makeTask({ id: 1, title: "Task", tddPhase: "Exempt" })],
+    });
+    const ctx = makeCtx({ filteredSessions: [session] });
+    ctx.activePromises.set(session.id, Promise.resolve());
+
+    await handleMergingSession(ctx, session);
+
+    expect(mockGatherDecisionContext).toHaveBeenCalled();
+    expect(mockAskTriage).toHaveBeenCalled();
   });
 });

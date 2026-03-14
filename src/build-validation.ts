@@ -18,6 +18,7 @@ export interface BuildValidationOpts {
   cleanInstall: boolean;
   timeout?: number;
   verbose?: boolean;
+  skipTests?: boolean;
 }
 
 /**
@@ -146,7 +147,7 @@ export function runBuildValidation(
   let testFailCount = 0;
   let testPassCount = 0;
 
-  if (hasTestScript) {
+  if (hasTestScript && !opts.skipTests) {
     log("Running npm test...");
     try {
       const output = execFileSync("npm", ["test"], {

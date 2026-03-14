@@ -50,6 +50,7 @@ export async function squashMerge(
   session: Session,
   featureBranch: string,
   verbose: boolean,
+  skipTests?: boolean,
 ): Promise<void> {
   return serialize(async () => {
     const sessionBranch = session.branchName ?? `${featureBranch}-s${session.id}`;
@@ -128,7 +129,7 @@ export async function squashMerge(
       }
 
       // Step 3: Validate — install deps (if needed) and run build
-      const buildResult = runBuildValidation(repoRoot, { cleanInstall: false, timeout: NPM_TIMEOUT_MS });
+      const buildResult = runBuildValidation(repoRoot, { cleanInstall: false, timeout: NPM_TIMEOUT_MS, skipTests });
 
       // Stage lockfile in case npm install updated it
       if (fs.existsSync(`${repoRoot}/package.json`)) {

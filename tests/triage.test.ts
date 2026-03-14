@@ -1357,6 +1357,79 @@ describe("executeTriageAction", () => {
 
     expect(session.status).toBe("merging");
   });
+
+  // ── attemptCount increment for all retriable actions ──
+
+  it("mark_done: increments attemptCount", async () => {
+    const session = makeSession({ id: "s3", status: "failed", attemptCount: 1 });
+    const decision = { action: "mark_done" as const, reasoning: "work is done" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(session.attemptCount).toBe(2);
+  });
+
+  it("retry_merge_only: increments attemptCount", async () => {
+    const session = makeSession({ id: "s3", status: "failed", attemptCount: 0 });
+    const decision = { action: "retry_merge_only" as const, reasoning: "try merge" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(session.attemptCount).toBe(1);
+  });
+
+  it("resume_from_branch: increments attemptCount", async () => {
+    const session = makeSession({ id: "s3", status: "failed", attemptCount: 1 });
+    mockExistsSync.mockReturnValue(false);
+    const decision = { action: "resume_from_branch" as const, reasoning: "resume" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(session.attemptCount).toBe(2);
+  });
+
+  it("reuse_plan: increments attemptCount", async () => {
+    const session = makeSession({ id: "s3", status: "failed", attemptCount: 0 });
+    const decision = { action: "reuse_plan" as const, reasoning: "plan exists" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(session.attemptCount).toBe(1);
+  });
+
+  it("escalate: does NOT increment attemptCount", async () => {
+    const session = makeSession({ id: "s3", status: "failed", attemptCount: 1 });
+    const decision = { action: "escalate" as const, reasoning: "cannot recover" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(session.attemptCount).toBe(1);
+  });
+
+  it("skip_and_continue: does NOT increment attemptCount", async () => {
+    const session = makeSession({ id: "s3", status: "failed", attemptCount: 2 });
+    const decision = { action: "skip_and_continue" as const, reasoning: "skip" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(session.attemptCount).toBe(2);
+  });
+
+  it("extend_timeout: does NOT increment attemptCount", async () => {
+    const session = makeSession({ id: "s3", status: "running", attemptCount: 0 });
+    const decision = { action: "extend_timeout" as const, reasoning: "more time" };
+    const ctx = makeContext();
+
+    await executeTriageAction(session, decision, ctx, slug, featureBranch, projectDir, [], verbose);
+
+    expect(session.attemptCount).toBe(0);
+  });
 });
 
 // ─── extractReadableLines ─────────────────────────────────────────────────────

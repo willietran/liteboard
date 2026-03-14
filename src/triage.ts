@@ -39,6 +39,15 @@ const VALID_ACTIONS: ReadonlySet<string> = new Set<TriageAction>([
   "mark_done",
 ]);
 
+/** Actions that re-enter the triage loop and should increment attemptCount. */
+const RETRIABLE_ACTIONS: ReadonlySet<string> = new Set<TriageAction>([
+  "retry_from_scratch",
+  "resume_from_branch",
+  "retry_merge_only",
+  "reuse_plan",
+  "mark_done",
+]);
+
 const ACTION_DESCRIPTIONS: ActionDescription[] = [
   {
     action: "retry_from_scratch",
@@ -607,14 +616,19 @@ export async function executeTriageAction(
   allSessions: Session[],
   verbose: boolean,
 ): Promise<void> {
+  // Increment attempt count for all actions that can re-trigger triage.
+  // Terminal actions (escalate, skip_and_continue) and neutral ones (extend_timeout)
+  // don't re-enter the triage loop, so they don't count.
+  if (RETRIABLE_ACTIONS.has(decision.action)) {
+    session.attemptCount += 1;
+  }
+
   switch (decision.action) {
     case "retry_from_scratch":
       // Full restart: clean worktree+branch and re-queue from scratch.
-      // attemptCount tracks full restarts (not resume/reuse which preserve work).
       cleanupWorktree(slug, session.id, featureBranch, verbose, { preserveBranch: false });
       session.status = "queued";
       resetSessionForRetry(session);
-      session.attemptCount = session.attemptCount + 1;
       break;
 
     case "resume_from_branch": {

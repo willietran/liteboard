@@ -120,6 +120,42 @@ describe("squashMerge — trial merge succeeds", () => {
     );
   });
 
+  it("passes skipTests to runBuildValidation when provided", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "rev-parse" && a[1] === "--show-toplevel") {
+        return "/repo/root";
+      }
+      return "";
+    });
+
+    const session = makeSession("1", [makeTask(1, "chore: test")]);
+    await squashMerge(session, "feat/x", false, true);
+
+    expect(mockRunBuildValidation).toHaveBeenCalledWith(
+      "/repo/root",
+      expect.objectContaining({ skipTests: true }),
+    );
+  });
+
+  it("does not set skipTests when not provided", async () => {
+    mockExec.mockImplementation((cmd, args) => {
+      const a = args as string[];
+      if (cmd === "git" && a[0] === "rev-parse" && a[1] === "--show-toplevel") {
+        return "/repo/root";
+      }
+      return "";
+    });
+
+    const session = makeSession("1", [makeTask(1, "chore: test")]);
+    await squashMerge(session, "feat/x", false);
+
+    expect(mockRunBuildValidation).toHaveBeenCalledWith(
+      "/repo/root",
+      expect.objectContaining({ skipTests: undefined }),
+    );
+  });
+
   it("commits with the correct message after successful merge (single-task session)", async () => {
     const session = makeSession("3", [makeTask(3, "feat: add widget")]);
     await squashMerge(session, "feat/x", false);

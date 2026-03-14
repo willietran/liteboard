@@ -34,6 +34,13 @@ import {
 import { git } from "./git.js";
 import { artifactsDir } from "./paths.js";
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Returns true when every task in the session is TDD-Exempt (no tests expected). */
+function isSessionTddExempt(session: Session): boolean {
+  return session.tasks.every(t => !t.tddPhase || t.tddPhase === "Exempt");
+}
+
 // ─── Module-Level State ──────────────────────────────────────────────────────
 
 /**
@@ -250,7 +257,7 @@ async function handleFinalClose(
       } else {
         // Normal merge path
         session.stage = "Merging";
-        await squashMerge(session, ctx.args.branch, ctx.args.verbose);
+        await squashMerge(session, ctx.args.branch, ctx.args.verbose, isSessionTddExempt(session));
 
         // Append memory AFTER successful merge
         if (memBody) {
@@ -488,7 +495,7 @@ export async function handleMergingSession(ctx: SessionRunnerContext, session: S
       memBody = fs.readFileSync(memEntryPath, "utf-8");
     }
 
-    await squashMerge(session, ctx.args.branch, ctx.args.verbose);
+    await squashMerge(session, ctx.args.branch, ctx.args.verbose, isSessionTddExempt(session));
 
     if (memBody) {
       await appendMemoryEntry(ctx.args.projectPath, session.id, session.focus, memBody);
