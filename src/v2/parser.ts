@@ -169,7 +169,8 @@ function parseSessionHintsTable(content: string): Map<string, string> {
 
   // Parse header row to find column indices
   const headerCells = rows[0].split("|").map((c) => c.trim()).filter(Boolean);
-  const focusColIndex = headerCells.findIndex((h) => h.toLowerCase() === "focus");
+  const focusAliases = new Set(["focus", "theme", "description"]);
+  const focusColIndex = headerCells.findIndex((h) => focusAliases.has(h.toLowerCase()));
   // Session ID is always column 0
   const sessionColIndex = 0;
 
@@ -186,7 +187,7 @@ function parseSessionHintsTable(content: string): Map<string, string> {
 
     const focus = focusColIndex >= 0 && cells[focusColIndex]
       ? cells[focusColIndex]
-      : cells[cells.length - 1] ?? "";
+      : "";
 
     result.set(sessionId, focus);
   }
